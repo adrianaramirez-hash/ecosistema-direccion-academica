@@ -4,7 +4,7 @@ import streamlit as st
 st.set_page_config(page_title="Dirección Académica", layout="wide")
 
 # URL de la imagen del escudo (versión directa de tu enlace de Drive)
-logo_url = "https://drive.google.com/uc?export=view&id=1qZIKvyxFmhnFrgMEYUIMp92KOn5zca2G"
+logo_url = "udl_logo.png"
 
 # Encabezado con escudo + texto
 col1, col2 = st.columns([1, 4])
