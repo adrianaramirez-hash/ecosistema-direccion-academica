@@ -3,7 +3,7 @@ import streamlit as st
 # Configuración básica de la página
 st.set_page_config(page_title="Dirección Académica", layout="wide")
 
-# URL de la imagen del escudo (versión directa de tu enlace de Drive)
+# Escudo de la UDL desde el repositorio
 logo_url = "udl_logo.png"
 
 # Encabezado con escudo + texto
@@ -21,7 +21,7 @@ st.divider()
 # Selector de vista
 vista = st.selectbox(
     "Selecciona la vista:",
-    ["Dirección General", "Dirección Académica", "Director de carrera"]
+    ["Dirección General", "Dirección Académica", "Director de carrera"],
 )
 
 carrera = None
@@ -60,10 +60,30 @@ if vista == "Director de carrera":
             "Maestría en Administración de Recursos Humanos",
             "Maestría en Finanzas",
             "Maestría en Educación Especial",
-            "Preparatoria",
         ],
     )
 
+st.divider()
+
+# Menú desplegable de secciones
+seccion = st.selectbox(
+    "Selecciona el apartado del plan anual que deseas revisar:",
+    [
+        "Observación de clases",
+        "Encuesta de calidad",
+        "Evaluación docente",
+        "Capacitaciones",
+        "Índice de reprobación",
+        "Titulación",
+        "Ceneval",
+        "Exámenes departamentales",
+        "Aulas virtuales",
+    ],
+)
+
+st.divider()
+
+# Panel inicial: resumen de selección
 st.subheader("Panel inicial")
 
 st.write(f"Vista actual: **{vista}**")
@@ -72,3 +92,10 @@ if carrera:
     st.write(f"Carrera seleccionada: **{carrera}**")
 else:
     st.write("Carrera seleccionada: *no aplica para esta vista*")
+
+st.write(f"Apartado seleccionado: **{seccion}**")
+
+st.info(
+    "En los siguientes pasos conectaremos esta sección con la información en Google Sheets "
+    "para mostrar análisis específicos según la vista seleccionada."
+)
