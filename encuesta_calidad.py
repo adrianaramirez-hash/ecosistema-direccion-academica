@@ -7,7 +7,7 @@ import altair as alt
 import unicodedata
 
 # --------------------------------------------------
-# CONEXIÓN A GOOGLE SHEETS
+# CONFIG BÁSICA DE CONEXIÓN
 # --------------------------------------------------
 
 SCOPES = [
@@ -20,62 +20,47 @@ SPREADSHEET_URL = (
 )
 
 
-@st.cache_data(ttl=60)
-def cargar_datos_calidad():
-    """Carga datos de las hojas de Encuesta de calidad y construye diccionarios de áreas."""
-    creds_dict = json.loads(st.secrets["gcp_service_account_json"])
-    creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
-    client = gspread.authorize(creds)
-
-    sh = client.open_by_url(SPREADSHEET_URL)
-
-    # Hojas específicas
-    ws_virtual = sh.worksheet("servicios virtual y mixto virtu")
-    ws_esco = sh.worksheet("servicios escolarizados y licen")
-    ws_prep = sh.worksheet("Preparatoria ")
-
-    df_virtual = pd.DataFrame(ws_virtual.get_all_records())
-    df_esco = pd.DataFrame(ws_esco.get_all_records())
-    df_prep = pd.DataFrame(ws_prep.get_all_records())
-
-    # Construimos diccionarios de áreas con base en los índices de columnas
-    areas_virtual = construir_areas_virtual(df_virtual)
-    areas_esco = construir_areas_escolarizados(df_esco)
-    areas_prep = construir_areas_preparatoria(df_prep)
-
-    return df_virtual, df_esco, df_prep, areas_virtual, areas_esco, areas_prep
-
-
-# --------------------------------------------------
-# UTILIDADES DE TEXTO Y PUNTAJE
-# --------------------------------------------------
-
-
-def normalizar_texto(s):
+def normalizar_texto(s: str) -> str:
     if not isinstance(s, str):
-        return ""
+        s = str(s)
     s = s.strip().lower()
     s = unicodedata.normalize("NFKD", s)
     s = "".join(c for c in s if not unicodedata.combining(c))
     return s
 
 
+def get_worksheet_flexible(sh, target_prefix: str):
+    """
+    Busca una hoja cuyo nombre COMIENCE con el prefijo indicado,
+    ignorando mayúsculas, acentos y espacios.
+    """
+    target = normalizar_texto(target_prefix)
+
+    for ws in sh.worksheets():
+        name_norm = normalizar_texto(ws.title)
+        if name_norm.startswith(target):
+            return ws
+
+    raise gspread.WorksheetNotFound(target_prefix)
+
+
+# --------------------------------------------------
+# MAPEO DE RESPUESTAS A PUNTAJE (1–5)
+# --------------------------------------------------
+
+
 def respuesta_a_puntos_calidad(valor):
     """
-    Convierte respuestas de escalas tipo:
-    - Totalmente satisfecho / satisfecho / regularmente satisfecho / insatisfecho / totalmente insatisfecho
-    - Muy satisfecho / ni uno ni otro / etc.
-    - Siempre / casi siempre / algunas veces / nunca
-    - Totalmente de acuerdo / de acuerdo / etc.
-    a una escala 1–5 donde 5 es mejor.
+    Convierte respuestas tipo satisfacción / frecuencia / acuerdo
+    a escala 1–5, donde 5 = mejor.
     """
     if pd.isna(valor):
         return None
 
     t = normalizar_texto(str(valor))
 
-    # Escala de satisfacción
     mapa = {
+        # Satisfacción
         "totalmente satisfecho": 5,
         "muy satisfecho": 5,
         "satisfecho": 4,
@@ -104,27 +89,20 @@ def respuesta_a_puntos_calidad(valor):
         "totalmente en desacuerdo": 1,
     }
 
-    # Buscar coincidencia exacta
     if t in mapa:
         return mapa[t]
-
-    # Por si vienen cosas como "muy satisfecho " con espacios
-    for clave, puntaje in mapa.items():
-        if t == clave:
-            return puntaje
 
     return None
 
 
 # --------------------------------------------------
 # CONSTRUCCIÓN DE ÁREAS POR TIPO DE SERVICIO
-# (basado en tu diccionario y en el orden de columnas)
+# (Basado en tu diccionario de columnas)
 # --------------------------------------------------
 
 
 def construir_areas_virtual(df):
     cols = list(df.columns)
-    # A=0, B=1, C=2, ...
     areas = {
         "Director / Coordinador": cols[2:7],  # C–G
         "Aprendizaje": cols[7:16],  # H–P
@@ -165,6 +143,147 @@ def construir_areas_preparatoria(df):
 
 
 # --------------------------------------------------
+# CARGA DE DATOS DESDE GOOGLE SHEETS
+# --------------------------------------------------
+
+
+@st.cache_data(ttl=60)
+def cargar_datos_calidad():
+    """
+    Carga:
+    - Hojas de respuestas de los 3 servicios.
+    - Hoja 'Aplicaciones' con cortes (aplicacion_id, fechas).
+    - Diccionarios de áreas.
+    """
+    creds_dict = json.loads(st.secrets["gcp_service_account_json"])
+    creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+    client = gspread.authorize(creds)
+
+    sh = client.open_by_url(SPREADSHEET_URL)
+
+    # Hojas específicas (búsqueda flexible)
+    ws_virtual = get_worksheet_flexible(sh, "servicios virtual y mixto")
+    ws_esco = get_worksheet_flexible(sh, "servicios escolarizados y licen")
+    ws_prep = get_worksheet_flexible(sh, "preparatoria")
+    ws_aplic = get_worksheet_flexible(sh, "aplicaciones")
+
+    df_virtual = pd.DataFrame(ws_virtual.get_all_records())
+    df_esco = pd.DataFrame(ws_esco.get_all_records())
+    df_prep = pd.DataFrame(ws_prep.get_all_records())
+    df_aplic = pd.DataFrame(ws_aplic.get_all_records())
+
+    # Parseo fechas de aplicaciones
+    if not df_aplic.empty:
+        if "fecha_inicio" in df_aplic.columns:
+            df_aplic["fecha_inicio"] = pd.to_datetime(
+                df_aplic["fecha_inicio"], errors="coerce"
+            )
+        if "fecha_fin" in df_aplic.columns:
+            df_aplic["fecha_fin"] = pd.to_datetime(
+                df_aplic["fecha_fin"], errors="coerce"
+            )
+
+        # Normalizamos nombres de columnas por si acaso
+        if "formulario" in df_aplic.columns:
+            df_aplic["formulario"] = df_aplic["formulario"].astype(str)
+        if "aplicacion_id" in df_aplic.columns:
+            df_aplic["aplicacion_id"] = df_aplic["aplicacion_id"].astype(str)
+
+    # Diccionarios de áreas
+    areas_virtual = construir_areas_virtual(df_virtual)
+    areas_esco = construir_areas_escolarizados(df_esco)
+    areas_prep = construir_areas_preparatoria(df_prep)
+
+    return (
+        df_virtual,
+        df_esco,
+        df_prep,
+        df_aplic,
+        areas_virtual,
+        areas_esco,
+        areas_prep,
+    )
+
+
+# --------------------------------------------------
+# FUNCIONES DE CÁLCULO
+# --------------------------------------------------
+
+
+def calcular_promedios_areas(df, areas_por_tipo):
+    """
+    Calcula promedio por área combinando todos los tipos de servicio
+    según las áreas definidas por tipo.
+    """
+    acumulados = {}
+    total_suma = 0
+    total_n = 0
+
+    for tipo, areas in areas_por_tipo.items():
+        df_tipo = df[df["Tipo_servicio"] == tipo]
+        if df_tipo.empty:
+            continue
+
+        for area, columnas in areas.items():
+            suma_area = 0
+            n_area = 0
+
+            for col in columnas:
+                if col not in df_tipo.columns:
+                    continue
+                serie = df_tipo[col].apply(respuesta_a_puntos_calidad).dropna()
+                if serie.empty:
+                    continue
+                suma_area += serie.sum()
+                n_area += serie.count()
+
+            if n_area == 0:
+                continue
+
+            if area not in acumulados:
+                acumulados[area] = {"suma": 0, "n": 0}
+            acumulados[area]["suma"] += suma_area
+            acumulados[area]["n"] += n_area
+
+            total_suma += suma_area
+            total_n += n_area
+
+    filas = []
+    for area, info in acumulados.items():
+        prom = info["suma"] / info["n"] if info["n"] > 0 else None
+        filas.append({"Área": area, "Promedio": prom})
+
+    df_areas = pd.DataFrame(filas)
+    promedio_general = total_suma / total_n if total_n > 0 else None
+
+    return df_areas, promedio_general
+
+
+def calcular_promedio_por_programa(df, areas_por_tipo):
+    """
+    Calcula el promedio general por programa / servicio,
+    usando todas las áreas correspondientes a su tipo de servicio.
+    """
+    filas = []
+
+    for (prog, tipo), df_sub in df.groupby(["Programa", "Tipo_servicio"]):
+        if tipo not in areas_por_tipo:
+            continue
+        areas_tipo = {tipo: areas_por_tipo[tipo]}
+        _, prom_general = calcular_promedios_areas(df_sub, areas_tipo)
+        filas.append(
+            {
+                "Programa": prog,
+                "Tipo_servicio": tipo,
+                "Promedio_general": prom_general,
+                "Encuestas": len(df_sub),
+            }
+        )
+
+    return pd.DataFrame(filas)
+
+
+# --------------------------------------------------
 # FUNCIÓN PRINCIPAL DEL MÓDULO
 # --------------------------------------------------
 
@@ -175,6 +294,7 @@ def render_encuesta_calidad(vista, carrera):
             df_virtual,
             df_esco,
             df_prep,
+            df_aplic,
             areas_virtual,
             areas_esco,
             areas_prep,
@@ -184,13 +304,13 @@ def render_encuesta_calidad(vista, carrera):
         st.exception(e)
         st.stop()
 
-    st.title("📝 Encuesta de calidad – Resultados generales")
+    st.title("📝 Encuesta de calidad – Resultados")
 
     # --------------------------------------------------
-    # NORMALIZACIÓN BÁSICA Y UNIFICACIÓN DE DATAFRAMES
+    # NORMALIZAR Y UNIFICAR DATAFRAMES
     # --------------------------------------------------
 
-    # Virtual / Mixto
+    # Virtual / mixto
     df_v = df_virtual.copy()
     if "Marca temporal" in df_v.columns:
         df_v["Fecha"] = pd.to_datetime(df_v["Marca temporal"], errors="coerce")
@@ -205,7 +325,7 @@ def render_encuesta_calidad(vista, carrera):
 
     df_v["Tipo_servicio"] = "Virtual/Mixto"
 
-    # Escolarizados / Licenciaturas ejecutivas
+    # Escolarizados / ejecutivas
     df_e = df_esco.copy()
     if "Marca temporal" in df_e.columns:
         df_e["Fecha"] = pd.to_datetime(df_e["Marca temporal"], errors="coerce")
@@ -227,14 +347,12 @@ def render_encuesta_calidad(vista, carrera):
     else:
         df_p["Fecha"] = pd.NaT
 
-    # Para prepa usamos un programa único "Preparatoria"
     df_p["Programa"] = "Preparatoria"
     df_p["Tipo_servicio"] = "Preparatoria"
 
-    # Unificamos
+    # Unificar todo
     df_all = pd.concat([df_v, df_e, df_p], ignore_index=True)
 
-    # Diccionario de áreas por tipo
     AREAS_POR_TIPO = {
         "Virtual/Mixto": areas_virtual,
         "Escolarizado/Ejecutivo": areas_esco,
@@ -242,41 +360,75 @@ def render_encuesta_calidad(vista, carrera):
     }
 
     # --------------------------------------------------
-    # FILTROS – VISTA, TIPO, PROGRAMA
+    # 🎛️ FILTROS: APLICACIÓN, TIPO, PROGRAMA
     # --------------------------------------------------
 
     st.markdown("### 🎛️ Filtros")
 
+    # Filtro de aplicación (corte)
+    col_app = st.columns(1)[0]
+
+    if df_aplic.empty or "aplicacion_id" not in df_aplic.columns:
+        aplic_sel = "Todas las aplicaciones"
+        df_base = df_all.copy()
+    else:
+        aplicaciones_ids = (
+            df_aplic["aplicacion_id"].dropna().astype(str).unique().tolist()
+        )
+        aplicaciones_ids = sorted(aplicaciones_ids)
+        opciones_aplic = ["Todas las aplicaciones"] + aplicaciones_ids
+
+        aplic_sel = col_app.selectbox(
+            "Aplicación de la encuesta (corte)", opciones_aplic
+        )
+
+        df_base = df_all.copy()
+        if aplic_sel != "Todas las aplicaciones":
+            df_aplic_sel = df_aplic[df_aplic["aplicacion_id"] == aplic_sel]
+            if not df_aplic_sel.empty:
+                fecha_ini = df_aplic_sel["fecha_inicio"].min()
+                fecha_fin = df_aplic_sel["fecha_fin"].max()
+                if pd.notna(fecha_ini) and pd.notna(fecha_fin):
+                    mask = (df_base["Fecha"] >= fecha_ini) & (
+                        df_base["Fecha"] <= fecha_fin
+                    )
+                    df_base = df_base[mask]
+
+    if df_base.empty:
+        st.warning(
+            "No hay encuestas en el rango de fechas de la aplicación seleccionada."
+        )
+        st.stop()
+
+    # Filtros de tipo de servicio y programa
     col_f1, col_f2 = st.columns(2)
 
-    # Filtro por tipo de servicio
-    tipos_disponibles = sorted(df_all["Tipo_servicio"].dropna().unique().tolist())
+    tipos_disponibles = sorted(df_base["Tipo_servicio"].dropna().unique().tolist())
     opciones_tipos = ["Todos los tipos"] + tipos_disponibles
 
     with col_f1:
         tipo_sel = st.selectbox("Tipo de servicio", opciones_tipos)
 
-    df_filtrado = df_all.copy()
-
+    df_filtrado = df_base.copy()
     if tipo_sel != "Todos los tipos":
         df_filtrado = df_filtrado[df_filtrado["Tipo_servicio"] == tipo_sel]
 
-    # Filtro por programa / carrera
+    # Programa / carrera
     if vista == "Director de carrera" and carrera:
         programa_sel = carrera
         with col_f2:
             st.markdown(
-                f"**Programa / servicio:** {carrera}  \n*(fijado por vista de Director de carrera)*"
+                f"**Programa / servicio:** {carrera}  \n"
+                f"*(fijado por vista de Director de carrera)*"
             )
         df_filtrado = df_filtrado[df_filtrado["Programa"] == programa_sel]
     else:
-        programas_disponibles = (
+        programas_disp = (
             ["Todos los programas"]
             + sorted(df_filtrado["Programa"].dropna().unique().tolist())
         )
         with col_f2:
-            programa_sel = st.selectbox("Programa / servicio", programas_disponibles)
-
+            programa_sel = st.selectbox("Programa / servicio", programas_disp)
         if programa_sel != "Todos los programas":
             df_filtrado = df_filtrado[df_filtrado["Programa"] == programa_sel]
 
@@ -284,11 +436,11 @@ def render_encuesta_calidad(vista, carrera):
         st.warning("No hay encuestas para el filtro seleccionado.")
         st.stop()
 
-    # Rango de fechas
+    # Info rápida
     rango_fechas = df_filtrado["Fecha"].agg(["min", "max"])
     st.caption(
-        f"Encuestas en el filtro actual: **{len(df_filtrado)}**  "
-        f"| Rango de fechas: "
+        f"Encuestas en el filtro actual: **{len(df_filtrado)}**  |  "
+        f"Rango de fechas: "
         f"{rango_fechas['min'].date() if pd.notna(rango_fechas['min']) else '—'} "
         f"a {rango_fechas['max'].date() if pd.notna(rango_fechas['max']) else '—'}"
     )
@@ -296,14 +448,11 @@ def render_encuesta_calidad(vista, carrera):
     st.markdown("---")
 
     # --------------------------------------------------
-    # CÁLCULO DE PROMEDIOS POR ÁREA
+    # KPIs + CÁLCULO DE ÁREAS
     # --------------------------------------------------
 
-    df_areas, promedio_general = calcular_promedios_areas(
-        df_filtrado, AREAS_POR_TIPO
-    )
+    df_areas, promedio_general = calcular_promedios_areas(df_filtrado, AREAS_POR_TIPO)
 
-    # KPIs
     total_encuestas = len(df_filtrado)
     area_mejor = df_areas.loc[df_areas["Promedio"].idxmax()] if not df_areas.empty else None
     area_peor = df_areas.loc[df_areas["Promedio"].idxmin()] if not df_areas.empty else None
@@ -330,14 +479,14 @@ def render_encuesta_calidad(vista, carrera):
     st.markdown("---")
 
     # --------------------------------------------------
-    # TABS PRINCIPALES
+    # TABS: ÁREAS, PROGRAMAS, COMENTARIOS
     # --------------------------------------------------
 
     tab_resumen, tab_programas, tab_comentarios = st.tabs(
         ["📊 Resumen por áreas", "🏫 Promedio por programa", "💬 Comentarios cualitativos"]
     )
 
-    # ------------------------- TAB 1: RESUMEN POR ÁREAS -------------------------
+    # --- TAB 1: RESUMEN POR ÁREAS ---
     with tab_resumen:
         st.subheader("Promedio por área de evaluación")
 
@@ -359,7 +508,7 @@ def render_encuesta_calidad(vista, carrera):
             )
             st.altair_chart(chart_areas, use_container_width=True)
 
-    # ------------------------- TAB 2: PROMEDIO POR PROGRAMA -------------------------
+    # --- TAB 2: PROMEDIO POR PROGRAMA ---
     with tab_programas:
         st.subheader("Promedio general por programa / servicio")
 
@@ -389,11 +538,10 @@ def render_encuesta_calidad(vista, carrera):
             )
             st.altair_chart(chart_prog, use_container_width=True)
 
-    # ------------------------- TAB 3: COMENTARIOS CUALITATIVOS -------------------------
+    # --- TAB 3: COMENTARIOS CUALITATIVOS ---
     with tab_comentarios:
         st.subheader("Comentarios cualitativos")
 
-        # Buscamos columnas de comentarios/sugerencias
         columnas_comentarios = [
             c
             for c in df_filtrado.columns
@@ -405,100 +553,16 @@ def render_encuesta_calidad(vista, carrera):
         if not columnas_comentarios:
             st.info("No se encontraron columnas de comentarios en este conjunto de datos.")
         else:
-            st.caption("Solo se muestran filas que tienen al menos un comentario registrado.")
-
+            st.caption("Solo se muestran filas con al menos un comentario registrado.")
             df_com = df_filtrado[["Fecha", "Programa"] + columnas_comentarios].copy()
-            # Filtrar filas con al menos un comentario no vacío
-            mask_tiene_comentario = df_com[columnas_comentarios].apply(
-                lambda row: any(
-                    isinstance(v, str) and v.strip() for v in row.values
-                ),
+
+            mask_tiene_com = df_com[columnas_comentarios].apply(
+                lambda row: any(isinstance(v, str) and v.strip() for v in row.values),
                 axis=1,
             )
-            df_com = df_com[mask_tiene_comentario]
+            df_com = df_com[mask_tiene_com]
 
             if df_com.empty:
                 st.info("No hay comentarios registrados para el filtro actual.")
             else:
                 st.dataframe(df_com, use_container_width=True)
-
-
-# --------------------------------------------------
-# FUNCIONES AUXILIARES DE CÁLCULO
-# --------------------------------------------------
-
-
-def calcular_promedios_areas(df, areas_por_tipo):
-    """
-    Calcula promedio por área combinando todos los tipos de servicio.
-    Usa los diccionarios de columnas por área para cada tipo.
-    """
-    acumulados = {}
-    total_suma = 0
-    total_n = 0
-
-    for tipo, areas in areas_por_tipo.items():
-        df_tipo = df[df["Tipo_servicio"] == tipo]
-        if df_tipo.empty:
-            continue
-
-        for area, columnas in areas.items():
-            suma_area = 0
-            n_area = 0
-
-            for col in columnas:
-                if col not in df_tipo.columns:
-                    continue
-                serie = df_tipo[col].apply(respuesta_a_puntos_calidad)
-                serie = serie.dropna()
-                if serie.empty:
-                    continue
-                suma_area += serie.sum()
-                n_area += serie.count()
-
-            if n_area == 0:
-                continue
-
-            if area not in acumulados:
-                acumulados[area] = {"suma": 0, "n": 0}
-            acumulados[area]["suma"] += suma_area
-            acumulados[area]["n"] += n_area
-
-            total_suma += suma_area
-            total_n += n_area
-
-    filas = []
-    for area, info in acumulados.items():
-        promedio = info["suma"] / info["n"] if info["n"] > 0 else None
-        filas.append({"Área": area, "Promedio": promedio})
-
-    df_areas = pd.DataFrame(filas)
-
-    promedio_general = total_suma / total_n if total_n > 0 else None
-
-    return df_areas, promedio_general
-
-
-def calcular_promedio_por_programa(df, areas_por_tipo):
-    """
-    Calcula el promedio general por programa / servicio,
-    utilizando todos los reactivos que entran en las áreas definidas.
-    """
-    filas = []
-    for (prog, tipo), df_sub in df.groupby(["Programa", "Tipo_servicio"]):
-        # construimos un diccionario reducido solo con el tipo correspondiente
-        if tipo not in areas_por_tipo:
-            continue
-        areas_tipo = {tipo: areas_por_tipo[tipo]}
-        _, prom_general = calcular_promedios_areas(df_sub, areas_tipo)
-        filas.append(
-            {
-                "Programa": prog,
-                "Tipo_servicio": tipo,
-                "Promedio_general": prom_general,
-                "Encuestas": len(df_sub),
-            }
-        )
-
-    df_prog = pd.DataFrame(filas)
-    return df_prog
