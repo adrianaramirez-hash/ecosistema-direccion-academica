@@ -1,5 +1,5 @@
 import streamlit as st
-import runpy
+import observacion_clases
 
 # Configuración básica de la página
 st.set_page_config(page_title="Dirección Académica", layout="wide")
@@ -61,7 +61,7 @@ if vista == "Director de carrera":
             "Maestría en Administración de Recursos Humanos",
             "Maestría en Finanzas",
             "Maestría en Educación Especial",
-              "Preparatoria",
+            "Preparatoria",
         ],
     )
 
@@ -99,7 +99,7 @@ st.write(f"Apartado seleccionado: **{seccion}**")
 st.markdown("---")
 
 if seccion == "Observación de clases":
-    # Ejecutamos el módulo completo de observación de clases
-    runpy.run_module("observacion_clases", run_name="__main__")
+    # Llamamos al módulo pasando vista y carrera
+    observacion_clases.render_observacion_clases(vista, carrera)
 else:
     st.info("Este apartado aún está en construcción dentro del ecosistema.")
