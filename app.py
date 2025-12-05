@@ -1,5 +1,6 @@
 import streamlit as st
 import observacion_clases
+import encuesta_calidad
 
 # Configuración básica de la página
 st.set_page_config(page_title="Dirección Académica", layout="wide")
@@ -98,8 +99,12 @@ st.write(f"Apartado seleccionado: **{seccion}**")
 
 st.markdown("---")
 
+# Enrutamiento por sección
 if seccion == "Observación de clases":
-    # Llamamos al módulo pasando vista y carrera
     observacion_clases.render_observacion_clases(vista, carrera)
+
+elif seccion == "Encuesta de calidad":
+    encuesta_calidad.render_encuesta_calidad(vista, carrera)
+
 else:
     st.info("Este apartado aún está en construcción dentro del ecosistema.")
