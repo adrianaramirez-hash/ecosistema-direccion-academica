@@ -192,12 +192,12 @@ def render_observacion_clases(vista, carrera):
     # CUADRO DE INFORMACIÓN SOBRE PUNTAJE
     # --------------------------------------------------
     with st.expander("ℹ️ ¿Cómo se calcula el puntaje y la clasificación?", expanded=False):
-        if PUNTAJE_MAX_OBS > 114:
+        if PUNTAJE_MAX_OBS > 0:
             st.markdown(
                 f"""
 **Instrumento de observación**
 
-- Número de reactivos evaluados: **{39}**  
+- Número de reactivos evaluados: **{NUM_REACTIVOS}**  
 - Puntaje por respuesta:
   - **Sí** → 3 puntos  
   - **Sin evidencia** → 2 puntos  
