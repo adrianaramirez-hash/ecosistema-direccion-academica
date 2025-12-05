@@ -61,6 +61,7 @@ if vista == "Director de carrera":
             "Maestría en Administración de Recursos Humanos",
             "Maestría en Finanzas",
             "Maestría en Educación Especial",
+              "Preparatoria",
         ],
     )
 
