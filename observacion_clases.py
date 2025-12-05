@@ -9,7 +9,6 @@ import altair as alt
 # --------------------------------------------------
 # CONFIGURACIÓN BÁSICA DE LA PÁGINA
 # --------------------------------------------------
-st.set_page_config(page_title="Observación de clases", layout="wide")
 st.title("📋 Observación de clases – Reportes por corte")
 
 # --------------------------------------------------
