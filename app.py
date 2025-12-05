@@ -1,4 +1,5 @@
 import streamlit as st
+import runpy
 
 # Configuración básica de la página
 st.set_page_config(page_title="Dirección Académica", layout="wide")
@@ -83,7 +84,6 @@ seccion = st.selectbox(
 
 st.divider()
 
-# Panel inicial: resumen de selección
 st.subheader("Panel inicial")
 
 st.write(f"Vista actual: **{vista}**")
@@ -95,7 +95,10 @@ else:
 
 st.write(f"Apartado seleccionado: **{seccion}**")
 
-st.info(
-    "En los siguientes pasos conectaremos esta sección con la información en Google Sheets "
-    "para mostrar análisis específicos según la vista seleccionada."
-)
+st.markdown("---")
+
+if seccion == "Observación de clases":
+    # Ejecutamos el módulo completo de observación de clases
+    runpy.run_module("observacion_clases", run_name="__main__")
+else:
+    st.info("Este apartado aún está en construcción dentro del ecosistema.")
