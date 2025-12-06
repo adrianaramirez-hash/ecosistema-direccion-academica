@@ -4,9 +4,9 @@ import gspread
 import json
 from google.oauth2.service_account import Credentials
 
-# ------------------------------------------------------
-# CONFIGURACION
-# ------------------------------------------------------
+# ============================================================
+# CONFIGURACIÓN GENERAL
+# ============================================================
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets.readonly",
@@ -20,11 +20,12 @@ HOJA_ESCOLAR = "servicios escolarizados y licenciaturas ejecutivas"
 HOJA_PREPA = "Preparatoria"
 HOJA_APLICACIONES = "Aplicaciones"
 
-COLUMNA_SERVICIO = "Carrera de procedencia"
+COLUMNA_CARRERA = "Carrera de procedencia"
 
-# ------------------------------------------------------
-# LEER DATOS
-# ------------------------------------------------------
+
+# ============================================================
+# CARGA DE DATOS DESDE GOOGLE SHEETS
+# ============================================================
 
 @st.cache_data(ttl=60)
 def cargar_datos_calidad():
@@ -34,24 +35,21 @@ def cargar_datos_calidad():
 
     sh = client.open_by_url(SPREADSHEET_URL)
 
-    ws_virtual = sh.worksheet(HOJA_VIRTUAL)
-    df_virtual = pd.DataFrame(ws_virtual.get_all_records())
+    def cargar_hoja(nombre):
+        ws = sh.worksheet(nombre)
+        return pd.DataFrame(ws.get_all_records())
 
-    ws_esco = sh.worksheet(HOJA_ESCOLAR)
-    df_esco = pd.DataFrame(ws_esco.get_all_records())
-
-    ws_prepa = sh.worksheet(HOJA_PREPA)
-    df_prepa = pd.DataFrame(ws_prepa.get_all_records())
-
-    ws_aplic = sh.worksheet(HOJA_APLICACIONES)
-    df_aplic = pd.DataFrame(ws_aplic.get_all_records())
+    df_virtual = cargar_hoja(HOJA_VIRTUAL)
+    df_esco = cargar_hoja(HOJA_ESCOLAR)
+    df_prepa = cargar_hoja(HOJA_PREPA)
+    df_aplic = cargar_hoja(HOJA_APLICACIONES)
 
     return df_virtual, df_esco, df_prepa, df_aplic
 
 
-# ------------------------------------------------------
-# MAPEO DE SECCIONES POR MODALIDAD
-# ------------------------------------------------------
+# ============================================================
+# DEFINICIÓN DE SECCIONES POR MODALIDAD
+# ============================================================
 
 SECCIONES = {
     "virtual": {
@@ -82,20 +80,34 @@ SECCIONES = {
     },
 }
 
-# ------------------------------------------------------
-# OBTENER PROMEDIOS POR SECCION
-# ------------------------------------------------------
 
-def extraer_seccion(df, rango):
+# ============================================================
+# FUNCIÓN PARA OBTENER PROMEDIOS POR SECCIÓN
+# ============================================================
+
+def columnas_por_rango(df, col_ini, col_fin):
+    """Obtiene columnas usando letra A–Z independientemente del nombre."""
+    cols = list(df.columns)
+    try:
+        i = cols.index(col_ini)
+        j = cols.index(col_fin)
+        return cols[i : j + 1]
+    except:
+        return []
+
+
+def promedio_seccion(df, rango):
     col_ini, col_fin = rango
-    cols = df.loc[:, col_ini:col_fin]
-    cols = cols.apply(pd.to_numeric, errors="coerce")
-    return cols.mean(axis=1), cols.mean().mean()
+    cols = columnas_por_rango(df, col_ini, col_fin)
+    if not cols:
+        return None
+    df_num = df[cols].apply(pd.to_numeric, errors="coerce")
+    return df_num.mean().mean()
 
 
-# ------------------------------------------------------
-# UI PRINCIPAL
-# ------------------------------------------------------
+# ============================================================
+# FUNCIÓN PRINCIPAL DEL MÓDULO
+# ============================================================
 
 def render_encuesta_calidad(vista, carrera_seleccionada):
     st.header("📊 Encuesta de Calidad – Resultados")
@@ -103,44 +115,69 @@ def render_encuesta_calidad(vista, carrera_seleccionada):
     try:
         df_virtual, df_esco, df_prepa, df_aplic = cargar_datos_calidad()
     except Exception as e:
-        st.error("No se pudieron cargar los datos de la Encuesta de calidad.")
+        st.error("❌ No se pudieron cargar los datos de la Encuesta de Calidad.")
         st.exception(e)
         return
 
-    # -------------------------------
+    # ────────────────────────────────────────────────
     # SELECTOR DE APLICACIÓN
-    # -------------------------------
-
+    # ────────────────────────────────────────────────
     if "descripcion" in df_aplic.columns:
         aplicaciones = df_aplic["descripcion"].unique()
     else:
         aplicaciones = ["Aplicación 1"]
 
     aplic_sel = st.selectbox("Seleccione aplicación:", aplicaciones)
+    st.divider()
 
-    st.markdown("---")
-
-    # -------------------------------
-    # PREPARAR DATOS POR MODALIDAD
-    # -------------------------------
-
+    # ────────────────────────────────────────────────
+    # PREPARAR MODALIDADES
+    # ────────────────────────────────────────────────
     modalidades = {
-        "Servicios virtuales": (df_virtual, "virtual"),
+        "Servicios virtuales y mixto virtual": (df_virtual, "virtual"),
         "Servicios escolarizados / ejecutivas": (df_esco, "escolar"),
         "Preparatoria": (df_prepa, "prepa"),
     }
 
-    # Vista global
+    # ============================================================
+    # VISTA DE DIRECCIÓN GENERAL y DIRECCIÓN ACADÉMICA
+    # ============================================================
     if vista in ["Dirección General", "Dirección Académica"]:
-        st.subheader("Resultados generales por modalidad")
-
         for nombre, (df, tipo) in modalidades.items():
             if df.empty:
                 continue
 
+            st.subheader(f"🔹 {nombre}")
+
+            for seccion, rango in SECCIONES[tipo].items():
+                prom = promedio_seccion(df, rango)
+                if prom is not None:
+                    st.write(f"**{seccion}:** {prom:.2f}")
+
+            st.markdown("---")
+
+    # ============================================================
+    # VISTA DE DIRECTOR DE CARRERA
+    # ============================================================
+    if vista == "Director de carrera" and carrera_seleccionada:
+        st.subheader(f"Resultados para: **{carrera_seleccionada}**")
+
+        for nombre, (df, tipo) in modalidades.items():
+
+            if df.empty or COLUMNA_CARRERA not in df.columns:
+                continue
+
+            df_filtrado = df[df[COLUMNA_CARRERA] == carrera_seleccionada]
+
+            if df_filtrado.empty:
+                continue
+
             st.markdown(f"### {nombre}")
 
-            if COLUMNA_SERVICIO in df.columns:
-                df_mod = df.copy()
-            else:
-                st.warning(f"No existe columna '{COLUM
+            for seccion, rango in SECCIONES[tipo].items():
+                prom = promedio_seccion(df_filtrado, rango)
+                if prom is not None:
+                    st.write(f"- **{seccion}:** {prom:.2f}")
+
+            st.markdown("---")
+
