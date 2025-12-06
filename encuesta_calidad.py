@@ -3,6 +3,9 @@ import pandas as pd
 import gspread
 import json
 from google.oauth2.service_account import Credentials
+import numpy as np
+import unicodedata
+import altair as alt
 
 # ============================================================
 # CONFIGURACIÓN GENERAL
@@ -13,7 +16,6 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive.readonly",
 ]
 
-# Tu Google Sheets de calidad
 SPREADSHEET_URL = (
     "https://docs.google.com/spreadsheets/d/"
     "1WAk0Jv42MIyn0iImsAT2YuCsC8-YphKnFxgJYQZKjqU/edit"
@@ -74,7 +76,7 @@ def cargar_datos_calidad():
 
 
 # ============================================================
-# DEFINICIÓN DE SECCIONES POR MODALIDAD (USANDO LETRAS DE EXCEL)
+# UTILIDADES PARA RANGOS Y ESCALAS
 # ============================================================
 
 def col_letter_to_index(col_letter: str) -> int:
@@ -90,7 +92,69 @@ def col_letter_to_index(col_letter: str) -> int:
     return res - 1  # 0-based
 
 
-# RANGOS DE COLUMNAS SEGÚN EL DICCIONARIO QUE ME COMPARTISTE
+def normalizar_texto(s: str) -> str:
+    """Quita acentos y pasa a minúsculas para mapear respuestas tipo Likert."""
+    if not isinstance(s, str):
+        return ""
+    s = s.strip()
+    s_norm = unicodedata.normalize("NFD", s)
+    s_norm = "".join(ch for ch in s_norm if unicodedata.category(ch) != "Mn")
+    return s_norm.lower()
+
+
+# Diccionarios de escalas (1 a 5)
+MAP_LIKERT = {
+    # Acuerdo
+    "totalmente en desacuerdo": 1,
+    "en desacuerdo": 2,
+    "neutral": 3,
+    "ni de acuerdo ni en desacuerdo": 3,
+    "de acuerdo": 4,
+    "totalmente de acuerdo": 5,
+    # Satisfacción
+    "muy insatisfecho": 1,
+    "insatisfecho": 2,
+    "poco satisfecho": 2,
+    "ni satisfecho ni insatisfecho": 3,
+    "satisfecho": 4,
+    "muy satisfecho": 5,
+    # Frecuencia
+    "nunca": 1,
+    "rara vez": 2,
+    "raramente": 2,
+    "casi nunca": 2,
+    "a veces": 3,
+    "ocasionalmente": 3,
+    "frecuente": 4,
+    "frecuentemente": 4,
+    "muy frecuente": 5,
+    "siempre": 5,
+    "casi siempre": 4,
+    "ni uno ni otro": 3,
+    # Calidad tipo malo–excelente
+    "muy malo": 1,
+    "malo": 2,
+    "regular": 3,
+    "bueno": 4,
+    "excelente": 5,
+}
+
+
+def mapear_respuesta_a_numero(valor):
+    """
+    Convierte una respuesta tipo texto (Likert) a un número 1–5.
+    Si no se reconoce, devuelve NaN (se ignora en los promedios).
+    """
+    if pd.isna(valor):
+        return np.nan
+    texto = normalizar_texto(str(valor))
+    return MAP_LIKERT.get(texto, np.nan)
+
+
+# ============================================================
+# DEFINICIÓN DE SECCIONES POR MODALIDAD (USANDO LETRAS DE EXCEL)
+# ============================================================
+
 SECCIONES_RANGOS = {
     "virtual": {
         "Director / Coordinador": ("C", "G"),
@@ -105,11 +169,11 @@ SECCIONES_RANGOS = {
         "Comunicación con la universidad": ("BA", "BE"),
     },
     "escolar": {
-        "Servicios administrativos / apoyo": ("I", "V"),
-        "Servicios académicos": ("W", "AH"),
-        "Director / Coordinador": ("AI", "AM"),
-        "Instalaciones y equipo tecnológico": ("AN", "AX"),
-        "Ambiente escolar": ("AY", "BE"),
+        "Servicios administrativos / apoyo": ("H", "Q"),
+        "Servicios académicos": ("R", "AC"),
+        "Director / Coordinador": ("AD", "BB"),
+        "Instalaciones y equipo tecnológico": ("BC", "BN"),
+        "Ambiente escolar": ("BO", "BU"),
     },
     "prepa": {
         "Servicios administrativos / apoyo": ("H", "Q"),
@@ -124,7 +188,8 @@ SECCIONES_RANGOS = {
 def promedio_seccion_por_rango(df: pd.DataFrame, rango_excel: tuple) -> float | None:
     """
     Calcula el promedio general de una sección tomando un rango de columnas
-    definido por letras de Excel (p.ej. ('C', 'G')) usando posición (iloc).
+    definido por letras de Excel (p.ej. ('C', 'G')) usando posición (iloc)
+    y mapeando las respuestas tipo Likert a números.
     """
     if df.empty:
         return None
@@ -137,10 +202,19 @@ def promedio_seccion_por_rango(df: pd.DataFrame, rango_excel: tuple) -> float | 
         return None
 
     j = min(j, df.shape[1] - 1)
-    sub = df.iloc[:, i : j + 1].apply(pd.to_numeric, errors="coerce")
-    if sub.size == 0:
+    sub = df.iloc[:, i : j + 1]
+
+    # Mapeamos todas las celdas a escala numérica (1–5)
+    sub_num = sub.applymap(mapear_respuesta_a_numero)
+
+    if sub_num.size == 0:
         return None
-    return float(sub.mean().mean())
+
+    prom = sub_num.to_numpy(dtype=float)
+    if np.isnan(prom).all():
+        return None
+
+    return float(np.nanmean(prom))
 
 
 def construir_resumen_secciones(df: pd.DataFrame, tipo_modalidad: str) -> pd.DataFrame:
@@ -208,7 +282,7 @@ def render_encuesta_calidad(vista: str, carrera_seleccionada: str | None):
         return
 
     # --------------------------------------------------
-    # Selector de aplicación
+    # Selector de aplicación (por descripción/fecha)
     # --------------------------------------------------
     aplicaciones = df_aplic["descripcion"].astype(str).tolist()
     aplic_sel = st.selectbox("Selecciona la aplicación de la encuesta:", aplicaciones)
@@ -223,9 +297,11 @@ def render_encuesta_calidad(vista: str, carrera_seleccionada: str | None):
     modalidad = _detectar_modalidad(str(formulario))
 
     st.caption(
-        f"Formulario: **{formulario}**  |  Modalidad detectada: **{modalidad}**  \n"
-        f"Vigencia de la aplicación: "
-        f"{fila_aplic.get('fecha_inicio', '—')} a {fila_aplic.get('fecha_fin', '—')}"
+        f"Aplicación seleccionada: **{aplic_sel}**  \n"
+        f"Modalidad: **{modalidad}**  \n"
+        f"Rango de fechas considerado: "
+        f"{fila_aplic.get('fecha_inicio', '—').date() if isinstance(fila_aplic.get('fecha_inicio'), pd.Timestamp) else fila_aplic.get('fecha_inicio', '—')} "
+        f"a {fila_aplic.get('fecha_fin', '—').date() if isinstance(fila_aplic.get('fecha_fin'), pd.Timestamp) else fila_aplic.get('fecha_fin', '—')}"
     )
     st.divider()
 
@@ -271,16 +347,16 @@ def render_encuesta_calidad(vista: str, carrera_seleccionada: str | None):
             break
 
     if col_satisf_global:
-        serie_sat = pd.to_numeric(df_base[col_satisf_global], errors="coerce")
-        prom_sat = float(serie_sat.mean()) if not serie_sat.empty else None
+        serie_sat_num = df_base[col_satisf_global].apply(mapear_respuesta_a_numero)
+        prom_sat = float(np.nanmean(serie_sat_num)) if not serie_sat_num.empty else None
         with col_k2:
-            if prom_sat is not None:
-                st.metric("Promedio satisfacción global", f"{prom_sat:.2f}")
+            if prom_sat is not None and not np.isnan(prom_sat):
+                st.metric("Promedio satisfacción global (1–5)", f"{prom_sat:.2f}")
             else:
-                st.metric("Promedio satisfacción global", "—")
+                st.metric("Promedio satisfacción global (1–5)", "—")
     else:
         with col_k2:
-            st.metric("Promedio satisfacción global", "N/D")
+            st.metric("Promedio satisfacción global (1–5)", "N/D")
 
     st.markdown("---")
 
@@ -288,8 +364,11 @@ def render_encuesta_calidad(vista: str, carrera_seleccionada: str | None):
     # TABS PRINCIPALES SEGÚN LA VISTA
     # ============================================================
 
+    # VISTAS: DIRECCIÓN GENERAL Y DIRECCIÓN ACADÉMICA
     if vista in ["Dirección General", "Dirección Académica"]:
-        tab_res, tab_carr = st.tabs(["📌 Promedio por sección", "🎓 Promedio por sección y carrera"])
+        tab_res, tab_carr = st.tabs(
+            ["📌 Promedio por sección", "🎓 Promedio por sección y carrera"]
+        )
 
         # 1) Promedio por sección (grupo completo)
         with tab_res:
@@ -298,16 +377,35 @@ def render_encuesta_calidad(vista: str, carrera_seleccionada: str | None):
             if df_secciones.empty:
                 st.info("No se pudieron calcular secciones para esta modalidad.")
             else:
-                st.dataframe(df_secciones, use_container_width=True)
+                col_t, col_g = st.columns([1, 1.5])
+
+                with col_t:
+                    st.dataframe(df_secciones, use_container_width=True)
+
+                with col_g:
+                    chart = (
+                        alt.Chart(df_secciones)
+                        .mark_bar()
+                        .encode(
+                            x=alt.X("Sección:N", sort="-y", title="Sección"),
+                            y=alt.Y("Promedio:Q", title="Promedio (1–5)"),
+                            tooltip=["Sección", "Promedio"],
+                        )
+                        .properties(height=350)
+                    )
+                    st.altair_chart(chart, use_container_width=True)
 
         # 2) Promedio por sección y carrera
         with tab_carr:
             if col_carrera is None:
                 st.info("No se encontró la columna de 'Carrera de procedencia'.")
             else:
-                st.subheader("Promedios por sección y carrera")
+                st.subheader("Promedios por sección filtrando por carrera")
                 carreras = sorted(df_base[col_carrera].dropna().unique().tolist())
-                carrera_filtro = st.selectbox("Filtrar por carrera (opcional):", ["Todas"] + carreras)
+                carrera_filtro = st.selectbox(
+                    "Filtrar por carrera:",
+                    ["Todas"] + carreras,
+                )
 
                 if carrera_filtro != "Todas":
                     df_c = df_base[df_base[col_carrera] == carrera_filtro].copy()
@@ -320,7 +418,24 @@ def render_encuesta_calidad(vista: str, carrera_seleccionada: str | None):
                     st.warning("No hay respuestas para el filtro seleccionado.")
                 else:
                     df_sec_c = construir_resumen_secciones(df_c, modalidad)
-                    st.dataframe(df_sec_c, use_container_width=True)
+                    if df_sec_c.empty:
+                        st.info("No se pudieron calcular secciones para esta modalidad.")
+                    else:
+                        col_t2, col_g2 = st.columns([1, 1.5])
+                        with col_t2:
+                            st.dataframe(df_sec_c, use_container_width=True)
+                        with col_g2:
+                            chart2 = (
+                                alt.Chart(df_sec_c)
+                                .mark_bar()
+                                .encode(
+                                    x=alt.X("Sección:N", sort="-y", title="Sección"),
+                                    y=alt.Y("Promedio:Q", title="Promedio (1–5)"),
+                                    tooltip=["Sección", "Promedio"],
+                                )
+                                .properties(height=350)
+                            )
+                            st.altair_chart(chart2, use_container_width=True)
 
     # ------------------------------------------------------------
     # VISTA: DIRECTOR DE CARRERA
@@ -351,6 +466,18 @@ def render_encuesta_calidad(vista: str, carrera_seleccionada: str | None):
             st.info("No se pudieron calcular secciones para esta modalidad.")
         else:
             st.dataframe(df_secc_dir, use_container_width=True)
+
+            chart_dir = (
+                alt.Chart(df_secc_dir)
+                .mark_bar()
+                .encode(
+                    x=alt.X("Sección:N", sort="-y", title="Sección"),
+                    y=alt.Y("Promedio:Q", title="Promedio (1–5)"),
+                    tooltip=["Sección", "Promedio"],
+                )
+                .properties(height=350)
+            )
+            st.altair_chart(chart_dir, use_container_width=True)
 
     else:
         st.info("La vista seleccionada aún no está configurada para la Encuesta de calidad.")
