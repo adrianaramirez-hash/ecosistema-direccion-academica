@@ -21,8 +21,6 @@ SPREADSHEET_URL = (
     "1WAk0Jv42MIyn0iImsAT2YuCsC8-YphKnFxgJYQZKjqU/edit"
 )
 
-COLUMNA_CARRERA_LIMPIA = "Carrera de procedencia"
-
 
 def _abrir_hoja_por_prefijo(sh, prefijo_busqueda):
     """
@@ -130,7 +128,6 @@ MAP_LIKERT = {
     "muy frecuente": 5,
     "siempre": 5,
     "casi siempre": 4,
-    "ni uno ni otro": 3,
     # Calidad tipo malo–excelente
     "muy malo": 1,
     "malo": 2,
@@ -142,24 +139,38 @@ MAP_LIKERT = {
 
 def mapear_respuesta_a_numero(valor):
     """
-    Convierte una respuesta tipo texto (Likert) a un número 1–5.
-    Si no se reconoce, devuelve NaN (se ignora en los promedios).
+    Convierte una respuesta a número:
+    - Si es número o texto numérico -> float
+    - Si es texto tipo Likert -> 1–5
+    - Si no se reconoce -> NaN
     """
     if pd.isna(valor):
         return np.nan
+
+    # 1) Intentar numérico directo
+    try:
+        num = float(str(valor).replace(",", "."))
+        # Si el valor está en una escala tipo 1–10, lo podemos reescalar o dejar tal cual.
+        # Por simplicidad lo dejamos tal cual, se promediará igual.
+        return num
+    except Exception:
+        pass
+
+    # 2) Intentar mapear texto Likert a 1–5
     texto = normalizar_texto(str(valor))
     return MAP_LIKERT.get(texto, np.nan)
 
 
 # ============================================================
-# DEFINICIÓN DE SECCIONES POR MODALIDAD (USANDO LETRAS DE EXCEL)
+# DEFINICIÓN DE SECCIONES POR MODALIDAD (TU DICCIONARIO)
 # ============================================================
 
 SECCIONES_RANGOS = {
+    # a) Servicios virtual y mixto virtual
     "virtual": {
         "Director / Coordinador": ("C", "G"),
         "Aprendizaje": ("H", "P"),
-        "Materiales en plataforma": ("Q", "U"),
+        "Materiales en la plataforma": ("Q", "U"),
         "Evaluación del conocimiento": ("V", "Y"),
         "Acceso a soporte académico": ("Z", "AD"),
         "Acceso a soporte administrativo": ("AE", "AI"),
@@ -168,13 +179,15 @@ SECCIONES_RANGOS = {
         "Plataforma SEAC": ("AV", "AZ"),
         "Comunicación con la universidad": ("BA", "BE"),
     },
+    # b) Servicios escolarizados y licenciaturas ejecutivas
     "escolar": {
-        "Servicios administrativos / apoyo": ("H", "Q"),
-        "Servicios académicos": ("R", "AC"),
-        "Director / Coordinador": ("AD", "BB"),
-        "Instalaciones y equipo tecnológico": ("BC", "BN"),
-        "Ambiente escolar": ("BO", "BU"),
+        "Servicios administrativos / apoyo": ("I", "V"),
+        "Servicios académicos": ("W", "AH"),
+        "Director / Coordinador": ("AI", "AM"),
+        "Instalaciones y equipo tecnológico": ("AN", "AX"),
+        "Ambiente escolar": ("AY", "BE"),
     },
+    # c) Preparatoria
     "prepa": {
         "Servicios administrativos / apoyo": ("H", "Q"),
         "Servicios académicos": ("R", "AC"),
@@ -189,7 +202,7 @@ def promedio_seccion_por_rango(df: pd.DataFrame, rango_excel: tuple) -> float | 
     """
     Calcula el promedio general de una sección tomando un rango de columnas
     definido por letras de Excel (p.ej. ('C', 'G')) usando posición (iloc)
-    y mapeando las respuestas tipo Likert a números.
+    y mapeando las respuestas a valores numéricos.
     """
     if df.empty:
         return None
@@ -204,17 +217,33 @@ def promedio_seccion_por_rango(df: pd.DataFrame, rango_excel: tuple) -> float | 
     j = min(j, df.shape[1] - 1)
     sub = df.iloc[:, i : j + 1]
 
-    # Mapeamos todas las celdas a escala numérica (1–5)
+    # Mapeamos todas las celdas a escala numérica
     sub_num = sub.applymap(mapear_respuesta_a_numero)
 
     if sub_num.size == 0:
         return None
 
-    prom = sub_num.to_numpy(dtype=float)
-    if np.isnan(prom).all():
+    arr = sub_num.to_numpy(dtype=float)
+    if np.isnan(arr).all():
         return None
 
-    return float(np.nanmean(prom))
+    return float(np.nanmean(arr))
+
+
+def clasificar_semaforo(prom):
+    """
+    Asigna semáforo según el promedio:
+    - 🟢 >= 4.0
+    - 🟡 3.0 – 3.9
+    - 🔴 < 3.0
+    """
+    if prom is None or np.isnan(prom):
+        return ""
+    if prom >= 4.0:
+        return "🟢"
+    if prom >= 3.0:
+        return "🟡"
+    return "🔴"
 
 
 def construir_resumen_secciones(df: pd.DataFrame, tipo_modalidad: str) -> pd.DataFrame:
@@ -226,7 +255,13 @@ def construir_resumen_secciones(df: pd.DataFrame, tipo_modalidad: str) -> pd.Dat
     for nombre_sec, rango in rangos.items():
         prom = promedio_seccion_por_rango(df, rango)
         if prom is not None:
-            filas.append({"Sección": nombre_sec, "Promedio": round(prom, 2)})
+            filas.append(
+                {
+                    "Sección": nombre_sec,
+                    "Promedio": round(prom, 2),
+                    "Semáforo": clasificar_semaforo(prom),
+                }
+            )
     return pd.DataFrame(filas)
 
 
@@ -282,7 +317,7 @@ def render_encuesta_calidad(vista: str, carrera_seleccionada: str | None):
         return
 
     # --------------------------------------------------
-    # Selector de aplicación (por descripción/fecha)
+    # Selector de aplicación (por descripción, que incluye periodo/fecha)
     # --------------------------------------------------
     aplicaciones = df_aplic["descripcion"].astype(str).tolist()
     aplic_sel = st.selectbox("Selecciona la aplicación de la encuesta:", aplicaciones)
@@ -296,12 +331,16 @@ def render_encuesta_calidad(vista: str, carrera_seleccionada: str | None):
     formulario = fila_aplic.get("formulario", "")
     modalidad = _detectar_modalidad(str(formulario))
 
+    # Texto de fechas
+    fi = fila_aplic.get("fecha_inicio")
+    ff = fila_aplic.get("fecha_fin")
+    fi_txt = fi.date() if isinstance(fi, pd.Timestamp) else fi
+    ff_txt = ff.date() if isinstance(ff, pd.Timestamp) else ff
+
     st.caption(
         f"Aplicación seleccionada: **{aplic_sel}**  \n"
-        f"Modalidad: **{modalidad}**  \n"
-        f"Rango de fechas considerado: "
-        f"{fila_aplic.get('fecha_inicio', '—').date() if isinstance(fila_aplic.get('fecha_inicio'), pd.Timestamp) else fila_aplic.get('fecha_inicio', '—')} "
-        f"a {fila_aplic.get('fecha_fin', '—').date() if isinstance(fila_aplic.get('fecha_fin'), pd.Timestamp) else fila_aplic.get('fecha_fin', '—')}"
+        f"Modalidad detectada: **{modalidad}**  \n"
+        f"Rango de fechas considerado: {fi_txt} a {ff_txt}"
     )
     st.divider()
 
@@ -351,12 +390,12 @@ def render_encuesta_calidad(vista: str, carrera_seleccionada: str | None):
         prom_sat = float(np.nanmean(serie_sat_num)) if not serie_sat_num.empty else None
         with col_k2:
             if prom_sat is not None and not np.isnan(prom_sat):
-                st.metric("Promedio satisfacción global (1–5)", f"{prom_sat:.2f}")
+                st.metric("Promedio satisfacción global", f"{prom_sat:.2f}")
             else:
-                st.metric("Promedio satisfacción global (1–5)", "—")
+                st.metric("Promedio satisfacción global", "—")
     else:
         with col_k2:
-            st.metric("Promedio satisfacción global (1–5)", "N/D")
+            st.metric("Promedio satisfacción global", "N/D")
 
     st.markdown("---")
 
@@ -367,7 +406,7 @@ def render_encuesta_calidad(vista: str, carrera_seleccionada: str | None):
     # VISTAS: DIRECCIÓN GENERAL Y DIRECCIÓN ACADÉMICA
     if vista in ["Dirección General", "Dirección Académica"]:
         tab_res, tab_carr = st.tabs(
-            ["📌 Promedio por sección", "🎓 Promedio por sección y carrera"]
+            ["📌 Promedio por sección (global)", "🎓 Promedio por sección y carrera"]
         )
 
         # 1) Promedio por sección (grupo completo)
@@ -388,8 +427,9 @@ def render_encuesta_calidad(vista: str, carrera_seleccionada: str | None):
                         .mark_bar()
                         .encode(
                             x=alt.X("Sección:N", sort="-y", title="Sección"),
-                            y=alt.Y("Promedio:Q", title="Promedio (1–5)"),
-                            tooltip=["Sección", "Promedio"],
+                            y=alt.Y("Promedio:Q", title="Promedio"),
+                            color=alt.value("#4c78a8"),
+                            tooltip=["Sección", "Promedio", "Semáforo"],
                         )
                         .properties(height=350)
                     )
@@ -430,8 +470,9 @@ def render_encuesta_calidad(vista: str, carrera_seleccionada: str | None):
                                 .mark_bar()
                                 .encode(
                                     x=alt.X("Sección:N", sort="-y", title="Sección"),
-                                    y=alt.Y("Promedio:Q", title="Promedio (1–5)"),
-                                    tooltip=["Sección", "Promedio"],
+                                    y=alt.Y("Promedio:Q", title="Promedio"),
+                                    color=alt.value("#72b7b2"),
+                                    tooltip=["Sección", "Promedio", "Semáforo"],
                                 )
                                 .properties(height=350)
                             )
@@ -472,8 +513,9 @@ def render_encuesta_calidad(vista: str, carrera_seleccionada: str | None):
                 .mark_bar()
                 .encode(
                     x=alt.X("Sección:N", sort="-y", title="Sección"),
-                    y=alt.Y("Promedio:Q", title="Promedio (1–5)"),
-                    tooltip=["Sección", "Promedio"],
+                    y=alt.Y("Promedio:Q", title="Promedio"),
+                    color=alt.value("#e45756"),
+                    tooltip=["Sección", "Promedio", "Semáforo"],
                 )
                 .properties(height=350)
             )
