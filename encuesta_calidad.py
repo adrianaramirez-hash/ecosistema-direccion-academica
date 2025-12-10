@@ -1,510 +1,356 @@
-import json
-from typing import List, Tuple, Optional
-
-import altair as alt
-import gspread
-import pandas as pd
 import streamlit as st
-from gspread.exceptions import WorksheetNotFound
+import pandas as pd
+import gspread
+import json
 from google.oauth2.service_account import Credentials
+import altair as alt
 
-# --------------------------------------------------
+# -------------------------------------------------------------------
 # CONFIGURACIÓN BÁSICA
-# --------------------------------------------------
-st.title("📝 Encuesta de calidad – Reportes")
-
+# -------------------------------------------------------------------
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets.readonly",
     "https://www.googleapis.com/auth/drive.readonly",
 ]
 
-# Ajusta esta URL solo si cambiaste el archivo en Drive.
+# Tu archivo maestro de calidad
 SPREADSHEET_URL = (
-    "https://docs.google.com/spreadsheets/d/1WAk0Jv42MIyn0iImsAT2YuCsC8-YphKnFxgJYQZKjqU/edit"
+    "https://docs.google.com/spreadsheets/d/"
+    "1WAk0Jv42MIyn0iImsAT2YuCsC8-YphKnFxgJYQZKjqU/edit"
 )
 
-# Nombre de la columna de carrera en los formularios
-COL_CARRERA = "Carrera de procedencia"
+# -------------------------------------------------------------------
+# UTILIDADES
+# -------------------------------------------------------------------
 
 
-# --------------------------------------------------
-# AYUDAS PARA CARGA DE DATOS
-# --------------------------------------------------
-def _abrir_hoja(sh, posibles_nombres: List[str], obligatorio: bool = True):
-    """Intenta abrir una hoja con varios posibles nombres."""
-    for nombre in posibles_nombres:
-        try:
-            return sh.worksheet(nombre)
-        except WorksheetNotFound:
-            continue
-    if obligatorio:
-        raise WorksheetNotFound(str(posibles_nombres))
-    return None
+def _normalizar_texto(txt: str) -> str:
+    if txt is None:
+        return ""
+    return str(txt).strip().lower().replace("_", " ")
 
 
-@st.cache_data(ttl=180)
-def cargar_datos_calidad():
-    """Conecta a Google Sheets y carga:
-    - Virtual
-    - Escolarizados / Ejecutivas
-    - Preparatoria
-    - Aplicaciones
+def detectar_modalidad(formulario: str) -> str:
     """
+    A partir del texto del campo 'formulario' de la hoja Aplicaciones,
+    devolvemos la modalidad: 'virtual', 'escolar' o 'prepa'.
+    """
+    t = _normalizar_texto(formulario)
+
+    if "virtual" in t and "mixto" in t:
+        return "virtual"
+    if "escolarizados" in t or "licenciaturas ejecutivas" in t:
+        return "escolar"
+    if "preparatoria" in t or "prepa" in t:
+        return "prepa"
+
+    return "desconocida"
+
+
+def obtener_nombre_hoja(formulario: str) -> str:
+    """
+    Mapeo flexible de 'formulario' (Aplicaciones) al nombre de la hoja
+    de respuestas correspondiente.
+    """
+    t = _normalizar_texto(formulario)
+
+    # intentamos detectar por palabras clave
+    if "virtual" in t and "mixto" in t:
+        # nombres posibles
+        return "servicios virtual y mixto virtual"
+    if "escolarizados" in t or "licenciaturas ejecutivas" in t:
+        return "servicios escolarizados y licenciaturas ejecutivas"
+    if "preparatoria" in t or "prepa" in t:
+        return "Preparatoria"
+
+    # por si decides usar exactamente los mismos nombres de formulario
+    return formulario
+
+
+# -------------------------------------------------------------------
+# CARGA DE DATOS
+# -------------------------------------------------------------------
+
+
+@st.cache_data(ttl=60)
+def cargar_datos_calidad():
+    # Credenciales desde secrets (Streamlit Cloud)
     creds_dict = json.loads(st.secrets["gcp_service_account_json"])
-    creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+    creds = Credentials.from_service_account_info(
+        creds_dict,
+        scopes=SCOPES,
+    )
     client = gspread.authorize(creds)
 
     sh = client.open_by_url(SPREADSHEET_URL)
 
-    # Hojas de respuestas (ajustamos a tus nombres)
-    ws_virtual = _abrir_hoja(
-        sh, ["servicios virtual y mixto virtual", "servicios virtual y mixto virtu"]
-    )
-    ws_esco = _abrir_hoja(
-        sh,
-        ["servicios escolarizados y licenciaturas ejecutivas"],
-    )
-    ws_prepa = _abrir_hoja(sh, ["Preparatoria", "preparatoria"])
+    # Hojas de respuestas
+    def leer_hoja(nombre_hoja):
+        try:
+            ws = sh.worksheet(nombre_hoja)
+        except Exception:
+            return pd.DataFrame()
+        datos = ws.get_all_records()
+        df = pd.DataFrame(datos)
+        return df
 
-    df_virtual = pd.DataFrame(ws_virtual.get_all_records()) if ws_virtual else pd.DataFrame()
-    df_esco = pd.DataFrame(ws_esco.get_all_records()) if ws_esco else pd.DataFrame()
-    df_prepa = pd.DataFrame(ws_prepa.get_all_records()) if ws_prepa else pd.DataFrame()
+    df_virtual = leer_hoja("servicios virtual y mixto virtual")
+    df_esco = leer_hoja("servicios escolarizados y licenciaturas ejecutivas")
+    df_prepa = leer_hoja("Preparatoria")
 
     # Hoja de aplicaciones
-    ws_aplic = _abrir_hoja(sh, ["Aplicaciones"])
-    df_aplic = pd.DataFrame(ws_aplic.get_all_records()) if ws_aplic else pd.DataFrame()
+    try:
+        ws_aplic = sh.worksheet("Aplicaciones")
+    except Exception as e:
+        st.error("No se encontró la hoja 'Aplicaciones' en el archivo de calidad.")
+        st.exception(e)
+        return (
+            pd.DataFrame(),
+            pd.DataFrame(),
+            pd.DataFrame(),
+            pd.DataFrame(),
+        )
 
-    # Normalizamos fechas de Marca temporal
-    for df in (df_virtual, df_esco, df_prepa):
+    datos_aplic = ws_aplic.get_all_records()
+    df_aplic = pd.DataFrame(datos_aplic)
+
+    # Limpieza de fechas en aplicaciones
+    for col in ["fecha_inicio", "fecha_fin"]:
+        if col in df_aplic.columns:
+            df_aplic[col] = pd.to_datetime(
+                df_aplic[col], dayfirst=True, errors="coerce"
+            )
+
+    # Normalizamos texto de formulario
+    if "formulario" in df_aplic.columns:
+        df_aplic["formulario"] = df_aplic["formulario"].astype(str).str.strip()
+    else:
+        df_aplic["formulario"] = ""
+
+    # Aseguramos Marca temporal como datetime en cada df de respuestas
+    def normalizar_fechas_respuestas(df):
+        if df.empty:
+            return df
         if "Marca temporal" in df.columns:
-            df["Marca temporal"] = pd.to_datetime(df["Marca temporal"], errors="coerce")
+            df["Marca temporal"] = pd.to_datetime(
+                df["Marca temporal"], dayfirst=True, errors="coerce"
+            )
+        return df
 
-    # Normalizamos fechas de Aplicaciones
-    if not df_aplic.empty:
-        for col in ("fecha_inicio", "fecha_fin"):
-            if col in df_aplic.columns:
-                df_aplic[col] = pd.to_datetime(df_aplic[col], errors="coerce")
+    df_virtual = normalizar_fechas_respuestas(df_virtual)
+    df_esco = normalizar_fechas_respuestas(df_esco)
+    df_prepa = normalizar_fechas_respuestas(df_prepa)
 
     return df_virtual, df_esco, df_prepa, df_aplic
 
 
-# --------------------------------------------------
-# CONFIGURACIÓN DE SECCIONES (DICCIONARIO QUE ME PASASTE)
-# --------------------------------------------------
-def excel_col_to_index(col: str) -> int:
-    """Convierte una columna tipo Excel (A, B, AA, BU, ...) a índice 0-based."""
-    col = col.strip().upper()
-    idx = 0
-    for ch in col:
-        idx = idx * 26 + (ord(ch) - ord("A") + 1)
-    return idx - 1
+# -------------------------------------------------------------------
+# INTERFAZ PRINCIPAL
+# -------------------------------------------------------------------
 
 
-SECCIONES_CONFIG = {
-    "virtual": [
-        ("Director / Coordinador", "C", "G"),
-        ("Aprendizaje", "H", "P"),
-        ("Materiales en la plataforma", "Q", "U"),
-        ("Evaluación del conocimiento", "V", "Y"),
-        ("Acceso a soporte académico", "Z", "AD"),
-        ("Acceso a soporte administrativo", "AE", "AI"),
-        ("Comunicación con compañeros", "AJ", "AQ"),
-        ("Recomendación", "AR", "AU"),
-        ("Plataforma SEAC", "AV", "AZ"),
-        ("Comunicación con la universidad", "BA", "BE"),
-    ],
-    "escolar": [
-        ("Servicios administrativos / apoyo", "I", "V"),
-        ("Servicios académicos", "W", "AH"),
-        ("Director / Coordinador", "AI", "AM"),
-        ("Instalaciones y equipo tecnológico", "AN", "AX"),
-        ("Ambiente escolar", "AY", "BE"),
-    ],
-    "prepa": [
-        ("Servicios administrativos / apoyo", "H", "Q"),
-        ("Servicios académicos", "R", "AC"),
-        ("Directores y coordinadores", "AD", "BB"),
-        ("Instalaciones y equipo tecnológico", "BC", "BN"),
-        ("Ambiente escolar", "BO", "BU"),
-    ],
-}
+def render_encuesta_calidad(vista: str, carrera_seleccionada: str | None):
+    st.header("📊 Encuesta de calidad – Resultados")
 
-FORM_TO_KEY = {
-    "servicios virtual y mixto virtual": "virtual",
-    "servicios virtual y mixto virtu": "virtual",
-    "servicios escolarizados y licenciaturas ejecutivas": "escolar",
-    "Preparatoria": "prepa",
-    "preparatoria": "prepa",
-}
-
-MODALIDAD_LABEL = {
-    "virtual": "Servicios virtual y mixto virtual",
-    "escolar": "Servicios escolarizados y licenciaturas ejecutivas",
-    "prepa": "Preparatoria",
-}
-
-
-def clasificar_semaforo(promedio: Optional[float]) -> str:
-    if promedio is None or pd.isna(promedio):
-        return ""
-    if promedio >= 4.5:
-        return "🟢 Alto"
-    if promedio >= 3.5:
-        return "🟡 Medio"
-    return "🔴 Bajo"
-
-
-def obtener_secciones(df: pd.DataFrame, modalidad_key: str) -> pd.DataFrame:
-    """Calcula promedio por sección para un DF y una modalidad."""
-    if df.empty:
-        return pd.DataFrame(
-            columns=["Modalidad", "Sección", "Promedio", "Respuestas", "Semáforo"]
-        )
-
-    config = SECCIONES_CONFIG.get(modalidad_key, [])
-    resultados = []
-
-    for nombre_seccion, col_ini, col_fin in config:
-        idx_ini = excel_col_to_index(col_ini)
-        idx_fin = excel_col_to_index(col_fin)
-        cols = list(df.columns[idx_ini : idx_fin + 1])
-
-        if not cols:
-            continue
-
-        datos = df[cols].apply(pd.to_numeric, errors="coerce")
-
-        if datos.notna().sum().sum() == 0:
-            promedio = None
-            n_resp = len(df)
-        else:
-            promedio = float(datos.stack().mean())
-            n_resp = int(datos.notna().any(axis=1).sum())
-
-        resultados.append(
-            {
-                "Modalidad": MODALIDAD_LABEL.get(modalidad_key, modalidad_key),
-                "Sección": nombre_seccion,
-                "Promedio": promedio,
-                "Respuestas": n_resp,
-                "Semáforo": clasificar_semaforo(promedio),
-            }
-        )
-
-    return pd.DataFrame(resultados)
-
-
-# --------------------------------------------------
-# FILTRO POR APLICACIONES (USANDO LA HOJA APLICACIONES)
-# --------------------------------------------------
-def filtrar_por_aplicaciones(
-    df: pd.DataFrame,
-    df_aplic: pd.DataFrame,
-    formulario_objetivo: Optional[str],
-) -> pd.DataFrame:
-    """Filtra un DF de respuestas por las aplicaciones seleccionadas.
-
-    - df_aplic: subconjunto de la hoja Aplicaciones que ya respeta año y demás filtros.
-    - formulario_objetivo: nombre de formulario de esa hoja (para virtual / escolar / prepa).
-    """
-    if df.empty or "Marca temporal" not in df.columns:
-        return df
+    (
+        df_virtual,
+        df_esco,
+        df_prepa,
+        df_aplic,
+    ) = cargar_datos_calidad()
 
     if df_aplic.empty:
-        # Sin información de aplicaciones → usamos todo el DF
-        return df
+        st.warning("No se pudieron cargar las aplicaciones de la encuesta.")
+        return
 
-    subset = df_aplic.copy()
+    # ------------------------------------------------------------------
+    # SELECTOR DE APLICACIÓN
+    # ------------------------------------------------------------------
+    # Etiqueta para el selectbox
+    df_aplic = df_aplic.copy()
+    if "descripcion" not in df_aplic.columns:
+        df_aplic["descripcion"] = df_aplic["aplicacion_id"].astype(str)
 
-    if formulario_objetivo:
-        subset = subset[subset["formulario"] == formulario_objetivo]
+    df_aplic["label"] = df_aplic["descripcion"]
 
-    if subset.empty:
-        # No hay aplicaciones para este formulario en el filtro actual
-        return pd.DataFrame(columns=df.columns)
+    opciones = df_aplic["label"].tolist()
+    if not opciones:
+        st.warning("No hay aplicaciones registradas en la hoja 'Aplicaciones'.")
+        return
 
-    masks = []
-    for _, fila in subset.iterrows():
-        fi = pd.to_datetime(fila.get("fecha_inicio"), errors="coerce")
-        ff = pd.to_datetime(fila.get("fecha_fin"), errors="coerce")
-
-        if pd.isna(fi) or pd.isna(ff):
-            # Si no hay fechas válidas en esa fila, avisamos y tomamos todo el rango
-            masks.append(pd.Series(True, index=df.index))
-        else:
-            m = (df["Marca temporal"] >= fi) & (df["Marca temporal"] <= ff)
-            masks.append(m)
-
-    if not masks:
-        return df
-
-    mask_total = masks[0]
-    for m in masks[1:]:
-        mask_total |= m
-
-    return df.loc[mask_total].copy()
-
-
-# --------------------------------------------------
-# CARGA DE DATOS
-# --------------------------------------------------
-try:
-    df_virtual_orig, df_esco_orig, df_prepa_orig, df_aplic_orig = cargar_datos_calidad()
-except Exception as e:
-    st.error("No se pudieron cargar los datos de la Encuesta de calidad.")
-    st.exception(e)
-    st.stop()
-
-if df_aplic_orig.empty:
-    st.warning(
-        "La hoja **Aplicaciones** está vacía o no se pudo leer. "
-        "Por ahora se mostrarán los resultados sin separar por aplicación."
+    label_sel = st.selectbox(
+        "Selecciona la aplicación de la encuesta:",
+        opciones,
     )
 
-# --------------------------------------------------
-# FILTROS: AÑO, ÁREA, APLICACIÓN
-# --------------------------------------------------
-st.markdown("### 🎛️ Filtros de aplicación")
+    fila_aplic = df_aplic[df_aplic["label"] == label_sel].iloc[0]
 
-df_aplic = df_aplic_orig.copy()
+    formulario = fila_aplic.get("formulario", "")
+    aplic_id = fila_aplic.get("aplicacion_id", "")
+    f_ini = fila_aplic.get("fecha_inicio", pd.NaT)
+    f_fin = fila_aplic.get("fecha_fin", pd.NaT)
 
-# Año (por fecha_inicio)
-years = []
-if "fecha_inicio" in df_aplic.columns:
-    years = (
-        df_aplic["fecha_inicio"]
-        .dropna()
-        .dt.year.astype(int)
-        .sort_values()
-        .unique()
-        .tolist()
+    modalidad = detectar_modalidad(formulario)
+    nombre_hoja = obtener_nombre_hoja(formulario)
+
+    st.write(
+        f"Aplicación seleccionada: **{fila_aplic['descripcion']}**  "
+        f"(ID: `{aplic_id}`)"
+    )
+    st.write(f"Modalidad detectada: **{modalidad}**")
+    st.write(
+        "Rango de fechas considerado: "
+        f"{f_ini.date() if pd.notna(f_ini) else '—'} a "
+        f"{f_fin.date() if pd.notna(f_fin) else '—'}"
     )
 
-col_f1, col_f2, col_f3 = st.columns(3)
-
-with col_f1:
-    if years:
-        year_options = ["Todos los años"] + [str(y) for y in years]
-        year_selected = st.selectbox("Año de aplicación", year_options)
+    # ------------------------------------------------------------------
+    # SELECCIÓN DEL DATAFRAME BASE SEGÚN MODALIDAD
+    # ------------------------------------------------------------------
+    if modalidad == "virtual":
+        df_base = df_virtual.copy()
+    elif modalidad == "escolar":
+        df_base = df_esco.copy()
+    elif modalidad == "prepa":
+        df_base = df_prepa.copy()
     else:
-        year_selected = "Todos los años"
-
-with col_f2:
-    area_opciones = {
-        "Todas las áreas": None,
-        "Servicios virtual y mixto virtual": "servicios virtual y mixto virtual",
-        "Servicios escolarizados y licenciaturas ejecutivas": "servicios escolarizados y licenciaturas ejecutivas",
-        "Preparatoria": "Preparatoria",
-    }
-    area_visible = st.selectbox("Área / modalidad", list(area_opciones.keys()))
-    formulario_filtro = area_opciones[area_visible]
-
-# Filtramos hoja Aplicaciones por año y modalidad (si aplica)
-df_aplic_filtro = df_aplic.copy()
-
-if year_selected != "Todos los años" and "fecha_inicio" in df_aplic_filtro.columns:
-    anio_int = int(year_selected)
-    df_aplic_filtro = df_aplic_filtro[
-        df_aplic_filtro["fecha_inicio"].dt.year == anio_int
-    ]
-
-if formulario_filtro:
-    df_aplic_filtro = df_aplic_filtro[
-        df_aplic_filtro["formulario"] == formulario_filtro
-    ]
-
-with col_f3:
-    if df_aplic_filtro.empty:
-        aplicacion_selected_label = st.selectbox(
-            "Aplicación",
-            ["(no hay aplicaciones para el filtro seleccionado)"],
+        # Intento de rescate: usamos el nombre de hoja derivado
+        st.warning(
+            "No se pudo detectar claramente la modalidad a partir del formulario. "
+            "Se intentará usar el nombre de hoja derivado."
         )
-    else:
-        opciones_labels = []
-        opciones_indices = []
-
-        opciones_labels.append("Todas las aplicaciones del filtro")
-        opciones_indices.append(None)
-
-        for idx, fila in df_aplic_filtro.iterrows():
-            desc = str(fila.get("descripcion", "")).strip()
-            aplic_id = str(fila.get("aplicacion_id", "")).strip()
-            form = str(fila.get("formulario", "")).strip()
-            label = f"{aplic_id} – {desc} ({form})"
-            opciones_labels.append(label)
-            opciones_indices.append(idx)
-
-        aplicacion_selected_label = st.selectbox("Aplicación", opciones_labels)
-
-# Determinamos qué filas de Aplicaciones usar
-if df_aplic_filtro.empty or aplicacion_selected_label.startswith("(no hay"):
-    df_aplic_seleccion = pd.DataFrame(columns=df_aplic.columns)
-else:
-    if aplicacion_selected_label == "Todas las aplicaciones del filtro":
-        df_aplic_seleccion = df_aplic_filtro.copy()
-    else:
-        # Buscar índice correspondiente
-        pos = opciones_labels.index(aplicacion_selected_label)
-        idx_real = opciones_indices[pos]
-        df_aplic_seleccion = df_aplic_filtro.loc[[idx_real]].copy()
-
-# Mostramos información del periodo seleccionado
-if not df_aplic_seleccion.empty:
-    fi_min = df_aplic_seleccion["fecha_inicio"].min()
-    ff_max = df_aplic_seleccion["fecha_fin"].max()
-    st.caption(
-        f"Periodo de aplicación considerado: "
-        f"**{fi_min.date() if pd.notna(fi_min) else '—'}** a "
-        f"**{ff_max.date() if pd.notna(ff_max) else '—'}**."
-    )
-else:
-    st.caption("Periodo de aplicación: **sin filtro de fechas (todas las respuestas)**.")
-
-st.markdown("---")
-
-# --------------------------------------------------
-# VISTA: DIRECCIÓN GENERAL / ACADÉMICA / DIRECTOR
-# --------------------------------------------------
-# Intentamos recuperar de app.py si existen
-vista_externa = st.session_state.get("vista")
-carrera_externa = st.session_state.get("carrera")
-
-col_v1, col_v2 = st.columns(2)
-
-with col_v1:
-    if vista_externa in [
-        "Dirección General",
-        "Dirección Académica",
-        "Director de carrera",
-    ]:
-        vista = vista_externa
-        st.write(f"**Vista:** {vista}")
-    else:
-        vista = st.selectbox(
-            "Selecciona la vista",
-            ["Dirección General", "Dirección Académica", "Director de carrera"],
-        )
-
-# Primero filtramos por aplicaciones los DFs originales
-df_virtual = filtrar_por_aplicaciones(
-    df_virtual_orig, df_aplic_seleccion, "servicios virtual y mixto virtual"
-)
-df_esco = filtrar_por_aplicaciones(
-    df_esco_orig, df_aplic_seleccion, "servicios escolarizados y licenciaturas ejecutivas"
-)
-df_prepa = filtrar_por_aplicaciones(df_prepa_orig, df_aplic_seleccion, "Preparatoria")
-
-# Lista de carreras para el caso de director
-todas_carreras = []
-for df_tmp in (df_virtual_orig, df_esco_orig, df_prepa_orig):
-    if COL_CARRERA in df_tmp.columns:
-        todas_carreras.extend(df_tmp[COL_CARRERA].dropna().unique().tolist())
-todas_carreras = sorted(list(set(todas_carreras)))
-
-with col_v2:
-    carrera_seleccionada = None
-    if vista == "Director de carrera":
-        if carrera_externa and carrera_externa in todas_carreras:
-            carrera_seleccionada = carrera_externa
-            st.write(f"**Carrera:** {carrera_seleccionada}")
+        # usamos el cliente para leer esa hoja directamente
+        try:
+            (
+                df_v,
+                df_e,
+                df_p,
+                _,
+            ) = cargar_datos_calidad()
+        except Exception:
+            df_base = pd.DataFrame()
         else:
-            carrera_seleccionada = st.selectbox(
-                "Selecciona la carrera",
-                todas_carreras if todas_carreras else ["(sin carreras detectadas)"],
+            # no hay forma clara de escoger, así que leemos en frío
+            df_base = pd.DataFrame()
+
+    if df_base.empty:
+        st.warning(
+            "La hoja de respuestas correspondiente a esta modalidad está vacía "
+            "o no se pudo leer. "
+            "Verifica el nombre de las hojas en el archivo de Google Sheets."
+        )
+        return
+
+    # ------------------------------------------------------------------
+    # FILTRO POR FECHAS (APLICACIÓN)
+    # ------------------------------------------------------------------
+    df_filtrado = df_base.copy()
+
+    if pd.notna(f_ini) and pd.notna(f_fin):
+        # nos aseguramos que fecha_inicio <= fecha_fin
+        if f_ini > f_fin:
+            f_ini, f_fin = f_fin, f_ini
+
+        if "Marca temporal" in df_filtrado.columns:
+            mask = (df_filtrado["Marca temporal"] >= f_ini) & (
+                df_filtrado["Marca temporal"] <= f_fin
             )
+            df_filtrado = df_filtrado.loc[mask]
 
-# Filtro por carrera si aplica
-if vista == "Director de carrera" and carrera_seleccionada and todas_carreras:
-    for df_tmp in (df_virtual, df_esco, df_prepa):
-        if not df_tmp.empty and COL_CARRERA in df_tmp.columns:
-            mask = df_tmp[COL_CARRERA] == carrera_seleccionada
-            df_tmp.drop(df_tmp[~mask].index, inplace=True)
+    # ------------------------------------------------------------------
+    # FILTRO POR CARRERA (SOLO DIRECTOR DE CARRERA)
+    # ------------------------------------------------------------------
+    if (
+        vista == "Director de carrera"
+        and carrera_seleccionada
+        and "Carrera de procedencia " in df_filtrado.columns
+    ):
+        df_filtrado = df_filtrado[
+            df_filtrado["Carrera de procedencia "] == carrera_seleccionada
+        ]
 
-st.markdown("---")
-
-# --------------------------------------------------
-# CÁLCULO DE SECCIONES POR MODALIDAD
-# --------------------------------------------------
-tablas_secciones: List[pd.DataFrame] = []
-
-if not df_virtual.empty:
-    tablas_secciones.append(obtener_secciones(df_virtual, "virtual"))
-
-if not df_esco.empty:
-    tablas_secciones.append(obtener_secciones(df_esco, "escolar"))
-
-if not df_prepa.empty:
-    tablas_secciones.append(obtener_secciones(df_prepa, "prepa"))
-
-if not tablas_secciones:
-    st.warning(
-        "No hay respuestas que coincidan con los filtros actuales "
-        "(año, aplicación, área y/o carrera)."
-    )
-    st.stop()
-
-df_secciones = pd.concat(tablas_secciones, ignore_index=True)
-
-# --------------------------------------------------
-# KPIs GENERALES
-# --------------------------------------------------
-total_respuestas = len(df_virtual) + len(df_esco) + len(df_prepa)
-
-df_valid = df_secciones.dropna(subset=["Promedio"])
-if not df_valid.empty:
-    prom_global = (
-        df_valid["Promedio"] * df_valid["Respuestas"]
-    ).sum() / df_valid["Respuestas"].sum()
-else:
-    prom_global = None
-
-n_rojas = int((df_secciones["Semáforo"] == "🔴 Bajo").sum())
-n_verdes = int((df_secciones["Semáforo"] == "🟢 Alto").sum())
-
-col_k1, col_k2, col_k3, col_k4 = st.columns(4)
-
-with col_k1:
-    st.metric("Respuestas en el filtro", total_respuestas)
-
-with col_k2:
-    st.metric(
-        "Promedio global",
-        f"{prom_global:.2f}" if prom_global is not None else "—",
+    # ------------------------------------------------------------------
+    # REVISIÓN DE DATOS FILTRADOS
+    # ------------------------------------------------------------------
+    st.caption(
+        f"Respuestas totales en la modalidad seleccionada: "
+        f"**{len(df_base)}** · "
+        f"Respuestas dentro del rango de la aplicación (y filtros): "
+        f"**{len(df_filtrado)}**"
     )
 
-with col_k3:
-    st.metric("Secciones en verde", n_verdes)
+    if df_filtrado.empty:
+        st.warning("No hay respuestas en el rango de fechas para esta aplicación.")
+        return
 
-with col_k4:
-    st.metric("Secciones en rojo", n_rojas)
+    # ------------------------------------------------------------------
+    # KPI SENCILLO: CONTEO Y PROMEDIO GLOBAL DE ESCALA
+    # ------------------------------------------------------------------
+    # Para no depender de nombres específicos de columnas de escala,
+    # tomamos todas las columnas numéricas y calculamos un promedio general.
+    df_numeric = df_filtrado.select_dtypes(include=["number"])
 
-st.markdown("---")
+    total_resp = len(df_filtrado)
+    if not df_numeric.empty:
+        promedio_global = df_numeric.mean(axis=1).mean()
+    else:
+        promedio_global = None
 
-# --------------------------------------------------
-# TABLA Y GRÁFICA DE SECCIONES
-# --------------------------------------------------
-st.subheader("Resultados por sección")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Respuestas en esta aplicación (después de filtros)", total_resp)
+    with col2:
+        if promedio_global is not None:
+            st.metric("Promedio global (todas las preguntas numéricas)", f"{promedio_global:.2f}")
+        else:
+            st.metric("Promedio global", "N/D")
 
-st.dataframe(df_secciones, use_container_width=True)
+    st.markdown("---")
 
-try:
-    chart = (
-        alt.Chart(df_secciones)
-        .mark_bar()
-        .encode(
-            x=alt.X("Sección:N", sort=None, title="Sección"),
-            y=alt.Y("Promedio:Q", title="Promedio", scale=alt.Scale(domain=[1, 5])),
-            color=alt.Color("Modalidad:N", title="Modalidad"),
-            tooltip=[
-                "Modalidad",
-                "Sección",
-                alt.Tooltip("Promedio:Q", format=".2f"),
-                "Respuestas",
-                "Semáforo",
-            ],
+    # ------------------------------------------------------------------
+    # DISTRIBUCIÓN POR CARRERA (VISIÓN DIRECCIÓN)
+    # ------------------------------------------------------------------
+    if "Carrera de procedencia " in df_filtrado.columns:
+        st.subheader("Distribución de respuestas por carrera")
+
+        df_carr = (
+            df_filtrado["Carrera de procedencia "]
+            .value_counts()
+            .reset_index()
+            .rename(
+                columns={
+                    "index": "Carrera",
+                    "Carrera de procedencia ": "Respuestas",
+                }
+            )
         )
-        .properties(height=350)
-    )
-    st.altair_chart(chart, use_container_width=True)
-except Exception:
-    st.info("No se pudo generar la gráfica de barras para las secciones.")
+
+        chart = (
+            alt.Chart(df_carr)
+            .mark_bar()
+            .encode(
+                x=alt.X("Carrera:N", sort="-y"),
+                y=alt.Y("Respuestas:Q"),
+                tooltip=["Carrera", "Respuestas"],
+            )
+            .properties(height=320)
+        )
+        st.altair_chart(chart, use_container_width=True)
+        st.dataframe(df_carr, use_container_width=True)
+
+    # ------------------------------------------------------------------
+    # TABLA DETALLE (MUESTRA LAS RESPUESTAS FILTRADAS)
+    # ------------------------------------------------------------------
+    st.markdown("---")
+    st.subheader("Detalle de respuestas (muestra filtrada)")
+
+    st.dataframe(df_filtrado, use_container_width=True)
+
+
+# -------------------------------------------------------------------
+# Si quieres probar este módulo de forma independiente en Streamlit
+# (ejecutando `streamlit run encuesta_calidad.py`), descomenta:
+# -------------------------------------------------------------------
+# if __name__ == "__main__":
+#     st.set_page_config(page_title="Encuesta de calidad", layout="wide")
+#     render_encuesta_calidad("Dirección General", None)
