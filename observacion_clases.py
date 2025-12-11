@@ -118,7 +118,10 @@ def render_observacion_clases(vista, carrera):
 
     # Columna de fecha: usamos 'Fecha' o 'Marca temporal'
     col_fecha = "Fecha" if "Fecha" in df_respuestas.columns else "Marca temporal"
-    df_respuestas[col_fecha] = pd.to_datetime(df_respuestas[col_fecha], errors="coerce")
+    # Usamos dayfirst=True porque en Sheets tus fechas están como 1/10/2025 (día/mes/año)
+    df_respuestas[col_fecha] = pd.to_datetime(
+        df_respuestas[col_fecha], errors="coerce", dayfirst=True
+    )
 
     # Columnas clave
     COL_SERVICIO = "Indica el servicio"
@@ -129,13 +132,13 @@ def render_observacion_clases(vista, carrera):
             st.error(f"No se encontró la columna '{col}' en la hoja de respuestas.")
             st.stop()
 
-    # Hoja de cortes: convertir fechas
+    # Hoja de cortes: convertir fechas (dayfirst=True)
     if not df_cortes.empty:
         df_cortes["Fecha_inicio"] = pd.to_datetime(
-            df_cortes["Fecha_inicio"], errors="coerce"
+            df_cortes["Fecha_inicio"], errors="coerce", dayfirst=True
         )
         df_cortes["Fecha_fin"] = pd.to_datetime(
-            df_cortes["Fecha_fin"], errors="coerce"
+            df_cortes["Fecha_fin"], errors="coerce", dayfirst=True
         )
     else:
         df_cortes = pd.DataFrame(columns=["Corte", "Fecha_inicio", "Fecha_fin"])
@@ -234,6 +237,10 @@ En el caso de los **docentes**, se usa el **promedio de puntos por observación*
     if not df_cortes.empty:
         opciones_cortes += list(df_cortes["Corte"].astype(str))
 
+    # Agregamos explícitamente la opción "Sin corte" si existe en los datos
+    if "Sin corte" in df_respuestas["Corte"].unique():
+        opciones_cortes.append("Sin corte")
+
     col_f1, col_f2, col_f3 = st.columns(3)
 
     with col_f1:
@@ -248,11 +255,13 @@ En el caso de los **docentes**, se usa el **promedio de puntos por observación*
         df_para_filtros[COL_SERVICIO].dropna().unique().tolist()
     )
 
-    # 🔴 Ajuste 1: si es Director de carrera, el servicio queda fijado a la carrera
+    # Vista Director de carrera: servicio fijado a la carrera, pero filtrando de forma normalizada
     if vista == "Director de carrera" and carrera:
         servicio_seleccionado = carrera
         with col_f2:
-            st.markdown(f"**Servicio:** {carrera} (fijado por vista de Director de carrera)")
+            st.markdown(
+                f"**Servicio:** {carrera} (fijado por vista de Director de carrera)"
+            )
     else:
         servicios_disponibles = ["Todos los servicios"] + servicios_base
         with col_f2:
@@ -274,15 +283,30 @@ En el caso de los **docentes**, se usa el **promedio de puntos por observación*
     else:
         tipo_seleccionado = "Todos los tipos"
 
-    # Aplicar filtros
+    # --------------------------------------------------
+    # APLICAR FILTROS AL DATAFRAME BASE
+    # --------------------------------------------------
     df_filtrado = df_respuestas.copy()
 
+    # Filtro por corte
     if corte_seleccionado != "Todos los cortes":
         df_filtrado = df_filtrado[df_filtrado["Corte"] == corte_seleccionado]
 
+    # Filtro por servicio (con manejo especial para Director de carrera)
     if servicio_seleccionado != "Todos los servicios":
-        df_filtrado = df_filtrado[df_filtrado[COL_SERVICIO] == servicio_seleccionado]
+        if vista == "Director de carrera" and carrera:
+            carrera_norm = str(servicio_seleccionado).strip().lower()
+            df_filtrado = df_filtrado[
+                df_filtrado[COL_SERVICIO]
+                .astype(str)
+                .str.strip()
+                .str.lower()
+                == carrera_norm
+            ]
+        else:
+            df_filtrado = df_filtrado[df_filtrado[COL_SERVICIO] == servicio_seleccionado]
 
+    # Filtro por tipo de observación
     if tipo_seleccionado != "Todos los tipos" and tipo_obs_col:
         df_filtrado = df_filtrado[df_filtrado[tipo_obs_col] == tipo_seleccionado]
 
@@ -347,13 +371,26 @@ En el caso de los **docentes**, se usa el **promedio de puntos por observación*
 
         df_trend = df_respuestas.copy()
 
+        # Aplicar los filtros de servicio y tipo también a la serie temporal
         if servicio_seleccionado != "Todos los servicios":
-            df_trend = df_trend[df_trend[COL_SERVICIO] == servicio_seleccionado]
+            if vista == "Director de carrera" and carrera:
+                carrera_norm = str(servicio_seleccionado).strip().lower()
+                df_trend = df_trend[
+                    df_trend[COL_SERVICIO]
+                    .astype(str)
+                    .str.strip()
+                    .str.lower()
+                    == carrera_norm
+                ]
+            else:
+                df_trend = df_trend[df_trend[COL_SERVICIO] == servicio_seleccionado]
 
         if tipo_seleccionado != "Todos los tipos" and tipo_obs_col:
             df_trend = df_trend[df_trend[tipo_obs_col] == tipo_seleccionado]
 
+        # Podemos excluir "Sin corte" para esta gráfica si se desea
         df_trend = df_trend[df_trend["Corte"] != "Sin corte"]
+
         if not df_trend.empty:
             df_graf_cortes = (
                 df_trend.groupby(["Corte", "Clasificación_observación"])
@@ -523,9 +560,9 @@ En el caso de los **docentes**, se usa el **promedio de puntos por observación*
                     + df_doc["Grupo"].astype(str)
                 )
             else:
-                etiqueta_base = etiqueta_base + " | " + df_doc[
-                    COL_SERVICIO
-                ].astype(str)
+                etiqueta_base = (
+                    etiqueta_base + " | " + df_doc[COL_SERVICIO].astype(str)
+                )
 
             df_doc["Etiqueta_obs"] = etiqueta_base
 
@@ -645,7 +682,6 @@ En el caso de los **docentes**, se usa el **promedio de puntos por observación*
 
             # -------------------------
             # Comentarios cualitativos
-            # 🔴 Ajuste 2: más robusto y siempre visible
             # -------------------------
             st.subheader("Comentarios cualitativos de la observación seleccionada")
 
@@ -674,16 +710,10 @@ En el caso de los **docentes**, se usa el **promedio de puntos por observación*
             )
 
             st.markdown("**Fortalezas observadas:**")
-            st.write(
-                fortalezas if fortalezas else "Sin registro."
-            )
+            st.write(fortalezas if fortalezas else "Sin registro.")
 
             st.markdown("**Áreas de oportunidad observadas:**")
-            st.write(
-                areas_op if areas_op else "Sin registro."
-            )
+            st.write(areas_op if areas_op else "Sin registro.")
 
             st.markdown("**Recomendaciones generales para la mejora continua:**")
-            st.write(
-                recom if recom else "Sin registro."
-            )
+            st.write(recom if recom else "Sin registro.")
