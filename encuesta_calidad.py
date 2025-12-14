@@ -53,7 +53,8 @@ def detectar_modalidad(formulario: str) -> str:
 def obtener_nombre_hoja(formulario: str) -> str:
     """
     Mapeo flexible de 'formulario' (Aplicaciones) al nombre de la hoja
-    de respuestas correspondiente.
+    de respuestas correspondiente, cuando no se especifica explícita-
+    mente en la hoja 'Aplicaciones'.
     """
     t = _normalizar_texto(formulario)
 
@@ -83,24 +84,69 @@ def _limpiar_nombres_columnas(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _buscar_hoja_flexible(sh, nombre_hoja: str):
+    """
+    Si no se encuentra la hoja por nombre exacto, intenta localizarla
+    comparando los títulos normalizados (minúsculas, sin espacios).
+    Primero busca coincidencia exacta normalizada y luego coincidencia
+    por 'contiene'.
+    """
+    try:
+        hojas = sh.worksheets()
+    except Exception as e:
+        st.error("No se pudieron listar las hojas del archivo de encuestas.")
+        st.exception(e)
+        return None
+
+    objetivo = _normalizar_texto(nombre_hoja)
+
+    # 1) Coincidencia exacta normalizada
+    for ws in hojas:
+        if _normalizar_texto(ws.title) == objetivo:
+            return ws
+
+    # 2) Coincidencia por 'contiene' (más laxa)
+    for ws in hojas:
+        if objetivo in _normalizar_texto(ws.title):
+            return ws
+
+    return None
+
+
 def leer_hoja_a_dataframe(sh, nombre_hoja: str) -> pd.DataFrame:
     """
     Lee una hoja de Google Sheets usando get_all_values para evitar
     errores por encabezados duplicados. Si hay encabezados repetidos,
     los renombra automáticamente agregando sufijos _2, _3, etc.
     Luego limpia los nombres de columnas (strip de espacios).
+
+    Si no se encuentra la hoja con ese nombre exacto, se intenta
+    una búsqueda flexible por nombre normalizado.
     """
+    # 1) Intento directo por nombre exacto
     try:
         ws = sh.worksheet(nombre_hoja)
-    except Exception as e:
-        st.error(f"No se encontró la hoja '{nombre_hoja}'.")
-        st.exception(e)
-        return pd.DataFrame()
+    except Exception:
+        # 2) Intento flexible
+        ws = _buscar_hoja_flexible(sh, nombre_hoja)
+        if ws is None:
+            st.error(
+                f"No se encontró la hoja '{nombre_hoja}' "
+                "ni una coincidencia aproximada en el archivo."
+            )
+            # Opcional: mostrar nombres disponibles para depuración
+            try:
+                nombres = [w.title for w in sh.worksheets()]
+                st.info("Hojas disponibles en el archivo: " + ", ".join(nombres))
+            except Exception:
+                pass
+            return pd.DataFrame()
 
+    # A partir de aquí ya tenemos un worksheet válido
     try:
         values = ws.get_all_values()
     except Exception as e:
-        st.error(f"No se pudieron leer los datos de la hoja '{nombre_hoja}'.")
+        st.error(f"No se pudieron leer los datos de la hoja '{ws.title}'.")
         st.exception(e)
         return pd.DataFrame()
 
@@ -132,7 +178,7 @@ def _convertir_columnas_likert(df: pd.DataFrame) -> pd.DataFrame:
     """
     Intenta convertir automáticamente a numérico aquellas columnas
     de tipo object cuyos valores únicos (no vacíos) parecen ser
-    escalas tipo 1–5, 1–10, etc.
+    escalas tipo 0–10.
     """
     if df.empty:
         return df
@@ -278,9 +324,11 @@ def render_encuesta_calidad(vista: str, carrera_seleccionada: str | None):
     f_fin = fila_aplic.get("fecha_fin", pd.NaT)
 
     # Hoja de respuestas explícita (si la agregas en la hoja Aplicaciones)
-    hoja_respuestas_explicit = fila_aplic.get("hoja_respuestas", "") \
-        if "hoja_respuestas" in df_aplic.columns else ""
-
+    hoja_respuestas_explicit = (
+        fila_aplic.get("hoja_respuestas", "")
+        if "hoja_respuestas" in df_aplic.columns
+        else ""
+    )
     hoja_respuestas_explicit = str(hoja_respuestas_explicit).strip()
 
     if hoja_respuestas_explicit:
@@ -357,7 +405,7 @@ def render_encuesta_calidad(vista: str, carrera_seleccionada: str | None):
             f_ini, f_fin = f_fin, f_ini
 
         if "Marca temporal" in df_filtrado.columns:
-            # Hacemos f_fin exclusivo sumando un día
+            # Hacemos f_fin exclusivo sumando un día (incluye todo el día final)
             f_fin_exclusivo = f_fin + pd.Timedelta(days=1)
             mask = (df_filtrado["Marca temporal"] >= f_ini) & (
                 df_filtrado["Marca temporal"] < f_fin_exclusivo
