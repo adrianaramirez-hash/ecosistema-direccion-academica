@@ -13,11 +13,14 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive.readonly",
 ]
 
-# Archivo maestro de calidad (el que me compartiste)
+# Archivo maestro de calidad
 SPREADSHEET_URL = (
     "https://docs.google.com/spreadsheets/d/"
     "1WAk0Jv42MIyn0iImsAT2YuCsC8-YphKnFxgJYQZKjqU/edit"
 )
+
+# Nombre estándar de columna de carrera (ya sin espacios al final)
+COLUMNA_CARRERA = "Carrera de procedencia"
 
 # -------------------------------------------------------------------
 # UTILIDADES
@@ -65,11 +68,27 @@ def obtener_nombre_hoja(formulario: str) -> str:
     return formulario
 
 
+def _limpiar_nombres_columnas(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Limpia los nombres de columnas:
+    - strip() para quitar espacios al inicio y al final.
+    """
+    cols_limpias = []
+    for c in df.columns:
+        if isinstance(c, str):
+            cols_limpias.append(c.strip())
+        else:
+            cols_limpias.append(c)
+    df.columns = cols_limpias
+    return df
+
+
 def leer_hoja_a_dataframe(sh, nombre_hoja: str) -> pd.DataFrame:
     """
     Lee una hoja de Google Sheets usando get_all_values para evitar
     errores por encabezados duplicados. Si hay encabezados repetidos,
     los renombra automáticamente agregando sufijos _2, _3, etc.
+    Luego limpia los nombres de columnas (strip de espacios).
     """
     try:
         ws = sh.worksheet(nombre_hoja)
@@ -105,6 +124,35 @@ def leer_hoja_a_dataframe(sh, nombre_hoja: str) -> pd.DataFrame:
             header_unique.append(f"{base}_{counts[base]}")
 
     df = pd.DataFrame(data, columns=header_unique)
+    df = _limpiar_nombres_columnas(df)
+    return df
+
+
+def _convertir_columnas_likert(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Intenta convertir automáticamente a numérico aquellas columnas
+    de tipo object cuyos valores únicos (no vacíos) parecen ser
+    escalas tipo 1–5, 1–10, etc.
+    """
+    if df.empty:
+        return df
+
+    likert_permitidos = {str(i) for i in range(0, 11)}  # 0 a 10
+
+    for col in df.columns:
+        if df[col].dtype == "object":
+            # Valores únicos no vacíos
+            valores = pd.Series(df[col].dropna().astype(str).str.strip())
+            valores = valores[valores != ""]
+            if valores.empty:
+                continue
+
+            unicos = set(valores.unique())
+
+            # Si hay pocos valores distintos y todos están en el rango 0–10
+            if 1 <= len(unicos) <= 11 and unicos.issubset(likert_permitidos):
+                df[col] = pd.to_numeric(df[col].str.strip(), errors="coerce")
+
     return df
 
 
@@ -158,19 +206,28 @@ def cargar_datos_calidad():
         else:
             df_aplic["formulario"] = ""
 
-    # Aseguramos Marca temporal como datetime en cada df de respuestas
-    def normalizar_fechas_respuestas(df):
+        # Opcional: limpiar hoja_respuestas si existe
+        if "hoja_respuestas" in df_aplic.columns:
+            df_aplic["hoja_respuestas"] = (
+                df_aplic["hoja_respuestas"].astype(str).str.strip()
+            )
+
+    # Aseguramos Marca temporal como datetime y convertimos columnas tipo Likert
+    def normalizar_respuestas(df):
         if df.empty:
             return df
+
         if "Marca temporal" in df.columns:
             df["Marca temporal"] = pd.to_datetime(
                 df["Marca temporal"], dayfirst=True, errors="coerce"
             )
+
+        df = _convertir_columnas_likert(df)
         return df
 
-    df_virtual = normalizar_fechas_respuestas(df_virtual)
-    df_esco = normalizar_fechas_respuestas(df_esco)
-    df_prepa = normalizar_fechas_respuestas(df_prepa)
+    df_virtual = normalizar_respuestas(df_virtual)
+    df_esco = normalizar_respuestas(df_esco)
+    df_prepa = normalizar_respuestas(df_prepa)
 
     return df_virtual, df_esco, df_prepa, df_aplic
 
@@ -220,8 +277,27 @@ def render_encuesta_calidad(vista: str, carrera_seleccionada: str | None):
     f_ini = fila_aplic.get("fecha_inicio", pd.NaT)
     f_fin = fila_aplic.get("fecha_fin", pd.NaT)
 
-    modalidad = detectar_modalidad(formulario)
-    nombre_hoja = obtener_nombre_hoja(formulario)
+    # Hoja de respuestas explícita (si la agregas en la hoja Aplicaciones)
+    hoja_respuestas_explicit = fila_aplic.get("hoja_respuestas", "") \
+        if "hoja_respuestas" in df_aplic.columns else ""
+
+    hoja_respuestas_explicit = str(hoja_respuestas_explicit).strip()
+
+    if hoja_respuestas_explicit:
+        nombre_hoja = hoja_respuestas_explicit
+        # Detectamos modalidad a partir del nombre de hoja, con fallback al formulario
+        t_hoja = _normalizar_texto(nombre_hoja)
+        if "virtual" in t_hoja:
+            modalidad = "virtual"
+        elif "escolarizados" in t_hoja or "ejecutivas" in t_hoja:
+            modalidad = "escolar"
+        elif "preparatoria" in t_hoja or "prepa" in t_hoja:
+            modalidad = "prepa"
+        else:
+            modalidad = detectar_modalidad(formulario)
+    else:
+        modalidad = detectar_modalidad(formulario)
+        nombre_hoja = obtener_nombre_hoja(formulario)
 
     st.write(
         f"Aplicación seleccionada: **{fila_aplic['descripcion']}**  "
@@ -251,11 +327,12 @@ def render_encuesta_calidad(vista: str, carrera_seleccionada: str | None):
             "Se intenta usar el nombre de hoja derivado."
         )
         df_virtual2, df_esco2, df_prepa2, _ = cargar_datos_calidad()
-        if nombre_hoja.lower().startswith("servicios virtual"):
+        nombre_lower = nombre_hoja.lower()
+        if nombre_lower.startswith("servicios virtual"):
             df_base = df_virtual2.copy()
-        elif nombre_hoja.lower().startswith("servicios escolarizados"):
+        elif nombre_lower.startswith("servicios escolarizados"):
             df_base = df_esco2.copy()
-        elif nombre_hoja.lower().startswith("preparatoria"):
+        elif nombre_lower.startswith("preparatoria"):
             df_base = df_prepa2.copy()
         else:
             df_base = pd.DataFrame()
@@ -275,12 +352,15 @@ def render_encuesta_calidad(vista: str, carrera_seleccionada: str | None):
     df_filtrado = df_base.copy()
 
     if pd.notna(f_ini) and pd.notna(f_fin):
+        # Aseguramos que f_ini <= f_fin
         if f_ini > f_fin:
             f_ini, f_fin = f_fin, f_ini
 
         if "Marca temporal" in df_filtrado.columns:
+            # Hacemos f_fin exclusivo sumando un día
+            f_fin_exclusivo = f_fin + pd.Timedelta(days=1)
             mask = (df_filtrado["Marca temporal"] >= f_ini) & (
-                df_filtrado["Marca temporal"] <= f_fin
+                df_filtrado["Marca temporal"] < f_fin_exclusivo
             )
             df_filtrado = df_filtrado.loc[mask]
 
@@ -290,10 +370,10 @@ def render_encuesta_calidad(vista: str, carrera_seleccionada: str | None):
     if (
         vista == "Director de carrera"
         and carrera_seleccionada
-        and "Carrera de procedencia " in df_filtrado.columns
+        and COLUMNA_CARRERA in df_filtrado.columns
     ):
         df_filtrado = df_filtrado[
-            df_filtrado["Carrera de procedencia "] == carrera_seleccionada
+            df_filtrado[COLUMNA_CARRERA] == carrera_seleccionada
         ]
 
     total_filtrado = len(df_filtrado)
@@ -313,6 +393,7 @@ def render_encuesta_calidad(vista: str, carrera_seleccionada: str | None):
     df_numeric = df_filtrado.select_dtypes(include=["number"])
 
     if not df_numeric.empty:
+        # Promedio global: promedio del promedio fila por fila
         promedio_global = df_numeric.mean(axis=1).mean()
     else:
         promedio_global = None
@@ -332,19 +413,46 @@ def render_encuesta_calidad(vista: str, carrera_seleccionada: str | None):
     st.markdown("---")
 
     # --------------------------------------------------------------
+    # PROMEDIO POR PREGUNTA (SI HAY COLUMNAS NUMÉRICAS)
+    # --------------------------------------------------------------
+    if not df_numeric.empty:
+        st.subheader("Promedio por pregunta (columnas numéricas)")
+
+        df_preg = (
+            df_numeric.mean()
+            .reset_index()
+            .rename(columns={"index": "Pregunta", 0: "Promedio"})
+        )
+
+        chart_preg = (
+            alt.Chart(df_preg)
+            .mark_bar()
+            .encode(
+                x=alt.X("Pregunta:N", sort="-y"),
+                y=alt.Y("Promedio:Q"),
+                tooltip=["Pregunta", "Promedio"],
+            )
+            .properties(height=320)
+        )
+        st.altair_chart(chart_preg, use_container_width=True)
+        st.dataframe(df_preg, use_container_width=True)
+
+        st.markdown("---")
+
+    # --------------------------------------------------------------
     # DISTRIBUCIÓN POR CARRERA (VISIÓN DIRECCIÓN)
     # --------------------------------------------------------------
-    if "Carrera de procedencia " in df_filtrado.columns:
+    if COLUMNA_CARRERA in df_filtrado.columns:
         st.subheader("Distribución de respuestas por carrera")
 
         df_carr = (
-            df_filtrado["Carrera de procedencia "]
+            df_filtrado[COLUMNA_CARRERA]
             .value_counts()
             .reset_index()
             .rename(
                 columns={
                     "index": "Carrera",
-                    "Carrera de procedencia ": "Respuestas",
+                    COLUMNA_CARRERA: "Respuestas",
                 }
             )
         )
@@ -363,10 +471,17 @@ def render_encuesta_calidad(vista: str, carrera_seleccionada: str | None):
         st.dataframe(df_carr, use_container_width=True)
 
     # --------------------------------------------------------------
-    # TABLA DETALLE
+    # TABLA DETALLE + DESCARGA
     # --------------------------------------------------------------
     st.markdown("---")
     st.subheader("Detalle de respuestas filtradas")
 
     st.dataframe(df_filtrado, use_container_width=True)
 
+    csv = df_filtrado.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        label="⬇️ Descargar respuestas filtradas (CSV)",
+        data=csv,
+        file_name="encuesta_calidad_filtrada.csv",
+        mime="text/csv",
+    )
