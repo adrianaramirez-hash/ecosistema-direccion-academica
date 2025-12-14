@@ -25,7 +25,7 @@ def cargar_datos_desde_sheets():
     )
     client = gspread.authorize(creds)
 
-    # 👉 URL DE TU GOOGLE SHEETS
+    # 👉 URL DE TU GOOGLE SHEETS (misma que ya usas)
     SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1CK7nphUH9YS2JqSWRhrgamYoQdgJCsn5tERA-WnwXes/edit?gid=1166549366#gid=1166549366"
 
     sh = client.open_by_url(SPREADSHEET_URL)
@@ -43,6 +43,9 @@ def cargar_datos_desde_sheets():
     return df_resp, df_cortes
 
 
+# --------------------------------------------------
+# FUNCIONES DE APOYO
+# --------------------------------------------------
 def respuesta_a_puntos(valor):
     """Convierte una respuesta (Sí / No / Sin evidencias / número) a puntos (1–3)."""
     if pd.isna(valor):
@@ -69,6 +72,7 @@ def clasificar_por_puntos(total_puntos):
         return "Consolidado"
     elif total_puntos >= 76:
         return "En proceso"
+        # <= 75
     else:
         return "No consolidado"
 
@@ -95,6 +99,14 @@ def obtener_texto(fila, posibles_nombres):
     return ""
 
 
+def normalizar_texto(valor):
+    """Normaliza texto para comparaciones (strip + lower)."""
+    return str(valor).strip().lower() if pd.notna(valor) else ""
+
+
+# --------------------------------------------------
+# FUNCIÓN PRINCIPAL DEL DASHBOARD
+# --------------------------------------------------
 def render_observacion_clases(vista, carrera):
     # --------------------------------------------------
     # CARGA DE DATOS
@@ -118,7 +130,8 @@ def render_observacion_clases(vista, carrera):
 
     # Columna de fecha: usamos 'Fecha' o 'Marca temporal'
     col_fecha = "Fecha" if "Fecha" in df_respuestas.columns else "Marca temporal"
-    # Usamos dayfirst=True porque en Sheets tus fechas están como 1/10/2025 (día/mes/año)
+
+    # Tus fechas vienen como 1/10/2025 (día/mes/año) → usamos dayfirst=True
     df_respuestas[col_fecha] = pd.to_datetime(
         df_respuestas[col_fecha], errors="coerce", dayfirst=True
     )
@@ -131,6 +144,14 @@ def render_observacion_clases(vista, carrera):
         if col not in df_respuestas.columns:
             st.error(f"No se encontró la columna '{col}' en la hoja de respuestas.")
             st.stop()
+
+    # Columna normalizada de servicio (para comparaciones robustas)
+    df_respuestas["Servicio_norm"] = df_respuestas[COL_SERVICIO].apply(normalizar_texto)
+
+    # Normalizamos la carrera que llega a la función (para vista director)
+    carrera_norm = None
+    if vista == "Director de carrera" and carrera:
+        carrera_norm = normalizar_texto(carrera)
 
     # Hoja de cortes: convertir fechas (dayfirst=True)
     if not df_cortes.empty:
@@ -152,8 +173,9 @@ def render_observacion_clases(vista, carrera):
     # SELECCIÓN DE COLUMNAS DE PUNTAJE
     # --------------------------------------------------
     todas_cols = list(df_respuestas.columns)
-    start_idx = 12  # M
-    end_idx = 52  # hasta AZ (exclusivo)
+    # Ajustado al esquema actual: de M a AZ
+    start_idx = 12  # columna M (índice 12)
+    end_idx = 52   # hasta AZ (exclusivo)
     cols_puntaje = todas_cols[start_idx:end_idx]
 
     AREAS = {
@@ -172,7 +194,6 @@ def render_observacion_clases(vista, carrera):
     # --------------------------------------------------
     # CÁLCULO DE PUNTOS Y CLASIFICACIÓN (EN TODO EL DF)
     # --------------------------------------------------
-
     def calcular_total_puntos_fila(row):
         total = 0
         for col in cols_puntaje:
@@ -210,7 +231,6 @@ def render_observacion_clases(vista, carrera):
   **{PUNTAJE_MAX_OBS} puntos**
 
 **Clasificación (observación y docente)**  
-La clasificación se realiza a partir del total o del **promedio de puntos**:
 
 - **Consolidado** → 97 puntos o más  
 - **En proceso** → de 76 a 96 puntos  
@@ -229,7 +249,6 @@ En el caso de los **docentes**, se usa el **promedio de puntos por observación*
     # --------------------------------------------------
     # FILTROS (SIN SIDEBAR)
     # --------------------------------------------------
-
     st.markdown("### 🎛️ Filtros")
 
     # Opciones de cortes
@@ -246,22 +265,27 @@ En el caso de los **docentes**, se usa el **promedio de puntos por observación*
     with col_f1:
         corte_seleccionado = st.selectbox("Corte", opciones_cortes)
 
-    # Servicios según el corte (o todos)
+    # Dataframe base para construir opciones de servicio
     df_para_filtros = df_respuestas.copy()
     if corte_seleccionado != "Todos los cortes":
         df_para_filtros = df_para_filtros[df_para_filtros["Corte"] == corte_seleccionado]
+
+    # Si es Director de carrera, restringimos ya por su servicio exacto
+    if carrera_norm:
+        df_para_filtros = df_para_filtros[
+            df_para_filtros["Servicio_norm"] == carrera_norm
+        ]
 
     servicios_base = sorted(
         df_para_filtros[COL_SERVICIO].dropna().unique().tolist()
     )
 
-    # Vista Director de carrera: servicio fijado a la carrera, pero filtrando de forma normalizada
-    if vista == "Director de carrera" and carrera:
-        servicio_seleccionado = carrera
+    # Selección de servicio
+    if carrera_norm:
+        # Director de carrera: servicio fijado
+        servicio_seleccionado = "(director)"
         with col_f2:
-            st.markdown(
-                f"**Servicio:** {carrera} (fijado por vista de Director de carrera)"
-            )
+            st.markdown(f"**Servicio:** {carrera} (vista Director de carrera)")
     else:
         servicios_disponibles = ["Todos los servicios"] + servicios_base
         with col_f2:
@@ -292,19 +316,12 @@ En el caso de los **docentes**, se usa el **promedio de puntos por observación*
     if corte_seleccionado != "Todos los cortes":
         df_filtrado = df_filtrado[df_filtrado["Corte"] == corte_seleccionado]
 
-    # Filtro por servicio (con manejo especial para Director de carrera)
-    if servicio_seleccionado != "Todos los servicios":
-        if vista == "Director de carrera" and carrera:
-            carrera_norm = str(servicio_seleccionado).strip().lower()
-            df_filtrado = df_filtrado[
-                df_filtrado[COL_SERVICIO]
-                .astype(str)
-                .str.strip()
-                .str.lower()
-                == carrera_norm
-            ]
-        else:
-            df_filtrado = df_filtrado[df_filtrado[COL_SERVICIO] == servicio_seleccionado]
+    # Filtro por servicio
+    if carrera_norm:
+        # Director de carrera: igualdad exacta normalizada
+        df_filtrado = df_filtrado[df_filtrado["Servicio_norm"] == carrera_norm]
+    elif servicio_seleccionado != "Todos los servicios":
+        df_filtrado = df_filtrado[df_filtrado[COL_SERVICIO] == servicio_seleccionado]
 
     # Filtro por tipo de observación
     if tipo_seleccionado != "Todos los tipos" and tipo_obs_col:
@@ -328,7 +345,6 @@ En el caso de los **docentes**, se usa el **promedio de puntos por observación*
     # --------------------------------------------------
     # KPIs GENERALES
     # --------------------------------------------------
-
     df_base = df_filtrado.copy()
     total_obs = len(df_base)
 
@@ -371,24 +387,17 @@ En el caso de los **docentes**, se usa el **promedio de puntos por observación*
 
         df_trend = df_respuestas.copy()
 
-        # Aplicar los filtros de servicio y tipo también a la serie temporal
-        if servicio_seleccionado != "Todos los servicios":
-            if vista == "Director de carrera" and carrera:
-                carrera_norm = str(servicio_seleccionado).strip().lower()
-                df_trend = df_trend[
-                    df_trend[COL_SERVICIO]
-                    .astype(str)
-                    .str.strip()
-                    .str.lower()
-                    == carrera_norm
-                ]
-            else:
-                df_trend = df_trend[df_trend[COL_SERVICIO] == servicio_seleccionado]
+        # Aplicar filtros de servicio
+        if carrera_norm:
+            df_trend = df_trend[df_trend["Servicio_norm"] == carrera_norm]
+        elif servicio_seleccionado != "Todos los servicios":
+            df_trend = df_trend[df_trend[COL_SERVICIO] == servicio_seleccionado]
 
+        # Filtro por tipo de observación
         if tipo_seleccionado != "Todos los tipos" and tipo_obs_col:
             df_trend = df_trend[df_trend[tipo_obs_col] == tipo_seleccionado]
 
-        # Podemos excluir "Sin corte" para esta gráfica si se desea
+        # Para la gráfica excluimos "Sin corte"
         df_trend = df_trend[df_trend["Corte"] != "Sin corte"]
 
         if not df_trend.empty:
@@ -590,7 +599,6 @@ En el caso de los **docentes**, se usa el **promedio de puntos por observación*
             # -------------------------
             # Resumen por áreas (todas las observaciones del docente)
             # -------------------------
-
             def calcular_resumen_areas(df, columnas_area):
                 puntos_totales = 0
                 max_puntos = 0
