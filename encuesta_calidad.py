@@ -50,7 +50,7 @@ ESCALA_DESEMPEÑO = {
     "excelente": 5,
 }
 
-# Si tienes otras escalas, las podemos agregar aquí:
+# Si después detectamos otras frases, las agregamos aquí:
 # ESCALA_OTRA = { ... }
 
 # Unimos todas en un solo diccionario de reemplazo
@@ -109,6 +109,9 @@ def _limpiar_nombres_columnas(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _buscar_hoja_flexible(sh, nombre_hoja: str):
+    """
+    Busca una hoja por nombre normalizado (minúsculas, sin espacios extremos).
+    """
     try:
         hojas = sh.worksheets()
     except Exception as e:
@@ -118,10 +121,12 @@ def _buscar_hoja_flexible(sh, nombre_hoja: str):
 
     objetivo = _normalizar_texto(nombre_hoja)
 
+    # 1) Coincidencia exacta normalizada
     for ws in hojas:
         if _normalizar_texto(ws.title) == objetivo:
             return ws
 
+    # 2) Coincidencia por 'contiene'
     for ws in hojas:
         if objetivo in _normalizar_texto(ws.title):
             return ws
@@ -130,6 +135,10 @@ def _buscar_hoja_flexible(sh, nombre_hoja: str):
 
 
 def leer_hoja_a_dataframe(sh, nombre_hoja: str) -> pd.DataFrame:
+    """
+    Lee una hoja de Google Sheets con manejo de encabezados duplicados
+    y búsqueda flexible de nombre de hoja.
+    """
     try:
         ws = sh.worksheet(nombre_hoja)
     except Exception:
@@ -176,9 +185,15 @@ def leer_hoja_a_dataframe(sh, nombre_hoja: str) -> pd.DataFrame:
 
 
 def _convertir_textos_a_numeros(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Convierte textos de escalas (acuerdo, frecuencia, desempeño, etc.) a números
+    y luego intenta convertir a numérico real las columnas que quedaron
+    como cadenas de dígitos.
+    """
     if df.empty:
         return df
 
+    # Reemplazo texto→número
     for col in df.columns:
         if df[col].dtype == "object":
             serie_lower = df[col].astype(str).str.lower().str.strip()
@@ -187,6 +202,7 @@ def _convertir_textos_a_numeros(df: pd.DataFrame) -> pd.DataFrame:
             if serie_num.notna().sum() > 0:
                 df[col] = serie_num.where(serie_num.notna(), df[col])
 
+    # Intentar numérico en columnas que parezcan dígitos
     for col in df.columns:
         if df[col].dtype == "object":
             try:
@@ -200,10 +216,13 @@ def _convertir_textos_a_numeros(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _convertir_columnas_likert(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Conversión automática adicional para columnas con valores '0'...'10' en texto.
+    """
     if df.empty:
         return df
 
-    likert_permitidos = {str(i) for i in range(0, 11)}  # 0 a 10
+    likert_permitidos = {str(i) for i in range(0, 11)}
 
     for col in df.columns:
         if df[col].dtype == "object":
@@ -307,6 +326,9 @@ def render_encuesta_calidad(vista: str, carrera_seleccionada: str | None):
         st.warning("No se pudieron cargar las aplicaciones de la encuesta.")
         return
 
+    # --------------------------------------------------------------
+    # SELECTOR DE APLICACIÓN
+    # --------------------------------------------------------------
     df_aplic = df_aplic.copy()
 
     if "descripcion" not in df_aplic.columns:
@@ -362,11 +384,6 @@ def render_encuesta_calidad(vista: str, carrera_seleccionada: str | None):
     )
     st.write(f"Formulario: `{formulario}` · Hoja de respuestas: `{nombre_hoja}`")
     st.write(f"Modalidad detectada: **{modalidad}**")
-    st.write(
-        "Rango de fechas considerado: "
-        f"{f_ini.date() if pd.notna(f_ini) else '—'} a "
-        f"{f_fin.date() if pd.notna(f_fin) else '—'}"
-    )
 
     vista_lower = (vista or "").lower()
     es_vista_global = any(
@@ -375,11 +392,27 @@ def render_encuesta_calidad(vista: str, carrera_seleccionada: str | None):
     )
 
     if es_vista_global:
+        # Vista Dirección General / Académica: no recortamos por fechas,
+        # se muestran TODAS las respuestas de todos los formularios.
+        st.write("Rango de fechas considerado: **todas las respuestas disponibles**")
+    else:
+        st.write(
+            "Rango de fechas considerado: "
+            f"{f_ini.date() if pd.notna(f_ini) else '—'} a "
+            f"{f_fin.date() if pd.notna(f_fin) else '—'}"
+        )
+
+    # --------------------------------------------------------------
+    # ELECCIÓN DEL DATAFRAME BASE
+    # --------------------------------------------------------------
+    if es_vista_global:
+        # Une virtual + escolar + prepa
         df_base = pd.concat(
             [df_virtual.copy(), df_esco.copy(), df_prepa.copy()],
             ignore_index=True,
         )
     else:
+        # Vista normal: se usa solo la modalidad detectada
         if modalidad == "virtual":
             df_base = df_virtual.copy()
         elif modalidad == "escolar":
@@ -411,9 +444,13 @@ def render_encuesta_calidad(vista: str, carrera_seleccionada: str | None):
 
     total_original = len(df_base)
 
+    # --------------------------------------------------------------
+    # FILTRO POR FECHAS
+    # --------------------------------------------------------------
     df_filtrado = df_base.copy()
 
-    if pd.notna(f_ini) and pd.notna(f_fin):
+    # SOLO aplicamos el recorte por fechas en vistas que NO son globales
+    if (not es_vista_global) and pd.notna(f_ini) and pd.notna(f_fin):
         if f_ini > f_fin:
             f_ini, f_fin = f_fin, f_ini
 
@@ -424,6 +461,9 @@ def render_encuesta_calidad(vista: str, carrera_seleccionada: str | None):
             )
             df_filtrado = df_filtrado.loc[mask]
 
+    # --------------------------------------------------------------
+    # FILTRO POR CARRERA (SOLO DIRECTOR DE CARRERA)
+    # --------------------------------------------------------------
     if (
         vista == "Director de carrera"
         and carrera_seleccionada
@@ -436,10 +476,122 @@ def render_encuesta_calidad(vista: str, carrera_seleccionada: str | None):
     total_filtrado = len(df_filtrado)
 
     st.caption(
-        f"Respuestas totales en la hoja de esta modalidad / vista: **{total_original}** · "
-        f"Respuestas después de aplicar fechas y filtros: **{total_filtrado}**"
+        f"Respuestas totales consideradas en esta vista: **{total_original}** · "
+        f"Respuestas después de aplicar filtros: **{total_filtrado}**"
     )
 
     if df_filtrado.empty:
-        st.warning("No hay respuestas en el rango de fechas para esta aplicación.")
-   
+        st.warning("No hay respuestas que cumplan con los filtros actuales.")
+        return
+
+    # --------------------------------------------------------------
+    # KPIs SENCILLOS
+    # --------------------------------------------------------------
+    df_numeric = df_filtrado.select_dtypes(include=["number"])
+
+    if not df_numeric.empty:
+        promedio_global = df_numeric.mean(axis=1).mean()
+    else:
+        promedio_global = None
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Respuestas en esta vista", total_filtrado)
+    with col2:
+        if promedio_global is not None:
+            st.metric(
+                "Promedio global (todas las preguntas numéricas)",
+                f"{promedio_global:.2f}",
+            )
+        else:
+            st.metric("Promedio global", "N/D")
+
+    st.markdown("---")
+
+    # --------------------------------------------------------------
+    # PROMEDIO POR PREGUNTA (SI HAY COLUMNAS NUMÉRICAS)
+    # --------------------------------------------------------------
+    if not df_numeric.empty:
+        st.subheader("Promedio por pregunta (columnas numéricas)")
+
+        df_preg = (
+            df_numeric.mean()
+            .reset_index()
+            .rename(columns={"index": "Pregunta", 0: "Promedio"})
+        )
+
+        st.dataframe(df_preg, use_container_width=True)
+
+        # Gráfica protegida
+        try:
+            chart_preg = (
+                alt.Chart(df_preg)
+                .mark_bar()
+                .encode(
+                    x=alt.X("Pregunta:N", sort="-y"),
+                    y=alt.Y("Promedio:Q"),
+                    tooltip=["Pregunta", "Promedio"],
+                )
+                .properties(height=320)
+            )
+            st.altair_chart(chart_preg, use_container_width=True)
+        except Exception as e:
+            st.error(
+                "No se pudo generar la gráfica de promedio por pregunta, "
+                "pero la tabla de datos se muestra arriba."
+            )
+            st.exception(e)
+
+        st.markdown("---")
+
+    # --------------------------------------------------------------
+    # DISTRIBUCIÓN POR CARRERA
+    # --------------------------------------------------------------
+    if COLUMNA_CARRERA in df_filtrado.columns:
+        st.subheader("Distribución de respuestas por carrera")
+
+        serie_carr = (
+            df_filtrado[COLUMNA_CARRERA].fillna("Sin carrera").astype(str)
+        )
+        df_carr = (
+            serie_carr.value_counts()
+            .reset_index()
+            .rename(columns={"index": "Carrera", COLUMNA_CARRERA: "Respuestas"})
+        )
+
+        st.dataframe(df_carr, use_container_width=True)
+
+        try:
+            chart = (
+                alt.Chart(df_carr)
+                .mark_bar()
+                .encode(
+                    x=alt.X("Carrera:N", sort="-y"),
+                    y=alt.Y("Respuestas:Q"),
+                    tooltip=["Carrera", "Respuestas"],
+                )
+                .properties(height=320)
+            )
+            st.altair_chart(chart, use_container_width=True)
+        except Exception as e:
+            st.error(
+                "No se pudo generar la gráfica de distribución por carrera, "
+                "pero la tabla de datos se muestra arriba."
+            )
+            st.exception(e)
+
+    # --------------------------------------------------------------
+    # TABLA DETALLE + DESCARGA
+    # --------------------------------------------------------------
+    st.markdown("---")
+    st.subheader("Detalle de respuestas filtradas")
+
+    st.dataframe(df_filtrado, use_container_width=True)
+
+    csv = df_filtrado.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        label="⬇️ Descargar respuestas filtradas (CSV)",
+        data=csv,
+        file_name="encuesta_calidad_filtrada.csv",
+        mime="text/csv",
+    )
