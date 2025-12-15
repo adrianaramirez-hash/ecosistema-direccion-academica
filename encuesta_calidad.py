@@ -11,9 +11,10 @@ from google.oauth2.service_account import Credentials
 # ============================================================
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 
+# PROCESADO (el que me compartiste)
 SPREADSHEET_URL_PROCESADO = (
     "https://docs.google.com/spreadsheets/d/"
-    "1WAk0Jv42MIyn0iImsAT2YuCsC8-YphKnFxgJYQZKjqU/edit"
+    "1zwa-cG8Bwn6IA0VBrW_gsIb-bB92nTpa2H5sS4LVvak/edit"
 )
 
 HOJAS_NUM = {
@@ -24,7 +25,7 @@ HOJAS_NUM = {
 HOJA_COMENTARIOS = "Comentarios"
 HOJA_LOG = "Log_conversion"
 
-# Columnas base por hoja (según encabezados reales que compartiste)
+# Encabezados base (según lo que me compartiste)
 CARRERA_COL_BY_HOJA = {
     "Virtual_num": "Selecciona el programa académico que estudias",
     "Escolar_num": "Carrera de procedencia",
@@ -65,7 +66,7 @@ SECCIONES_POR_HOJA = {
 }
 
 # ============================================================
-# UTILIDADES: EXCEL COL -> ÍNDICE
+# UTILIDADES
 # ============================================================
 def excel_col_to_index(col: str) -> int:
     col = str(col).strip().upper()
@@ -88,7 +89,7 @@ def columnas_por_rango(df: pd.DataFrame, start_col: str, end_col: str) -> list[s
     return cols[i : j + 1]
 
 def numeric_series(s: pd.Series) -> pd.Series:
-    # PROCESADO: no convertimos texto cualitativo; si hay texto, se vuelve NaN
+    # PROCESADO: sin conversiones semánticas; lo no numérico -> NaN
     return pd.to_numeric(s, errors="coerce")
 
 def mean_ponderado_por_respuestas(df: pd.DataFrame, item_cols: list[str]) -> tuple[float, int]:
@@ -109,11 +110,7 @@ def promedios_por_seccion(df: pd.DataFrame, hoja: str) -> pd.DataFrame:
     for seccion, (a, b) in SECCIONES_POR_HOJA[hoja].items():
         cols = columnas_por_rango(df, a, b)
         prom, n_valid = mean_ponderado_por_respuestas(df, cols)
-        rows.append({
-            "Sección": seccion,
-            "Promedio": prom,
-            "Respuestas válidas": n_valid
-        })
+        rows.append({"Sección": seccion, "Promedio": prom, "Respuestas válidas": n_valid})
     return pd.DataFrame(rows)
 
 def detalle_por_reactivo(df: pd.DataFrame, hoja: str, seccion: str) -> pd.DataFrame:
@@ -129,7 +126,12 @@ def detalle_por_reactivo(df: pd.DataFrame, hoja: str, seccion: str) -> pd.DataFr
             "Promedio": float(valid.mean()) if len(valid) else np.nan,
             "Respuestas válidas": int(valid.shape[0]),
         })
-    return pd.DataFrame(data)
+    df_det = pd.DataFrame(data)
+
+    # OCULTAR columnas sin datos (lo pediste)
+    df_det = df_det[df_det["Respuestas válidas"] > 0].copy()
+
+    return df_det
 
 def chart_barras_seccion(df_sec: pd.DataFrame, title: str):
     df_plot = df_sec.dropna(subset=["Promedio"]).copy()
@@ -149,6 +151,9 @@ def chart_barras_seccion(df_sec: pd.DataFrame, title: str):
     st.altair_chart(c, use_container_width=True)
 
 def chart_barras_reactivos(df_det: pd.DataFrame, title: str):
+    if df_det.empty:
+        st.info("No hay reactivos con respuestas válidas para graficar.")
+        return
     df_plot = df_det.dropna(subset=["Promedio"]).copy()
     if df_plot.empty:
         st.info("No hay promedios válidos por reactivo para graficar.")
@@ -169,7 +174,6 @@ def chart_barras_reactivos(df_det: pd.DataFrame, title: str):
 # CARGA SHEETS (PROCESADO)
 # ============================================================
 def _buscar_hoja(sh, nombre: str):
-    # búsqueda flexible por si hay mayúsculas o espacios
     objetivo = str(nombre).strip().lower()
     for ws in sh.worksheets():
         if ws.title.strip().lower() == objetivo:
@@ -196,7 +200,7 @@ def leer_hoja_df(sh, nombre_hoja: str) -> pd.DataFrame:
     header = values[0]
     rows = values[1:]
 
-    # encabezados únicos si se repiten
+    # encabezados únicos
     counts = {}
     header_unique = []
     for h in header:
@@ -214,7 +218,7 @@ def leer_hoja_df(sh, nombre_hoja: str) -> pd.DataFrame:
 
 def ensure_numeric_processed(df: pd.DataFrame, hoja: str) -> pd.DataFrame:
     """
-    PROCESADO: no conversiones semánticas.
+    PROCESADO: no conversiones de texto->número en Streamlit.
     Solo coerción a numérico para columnas no-base.
     """
     if df.empty:
@@ -222,9 +226,11 @@ def ensure_numeric_processed(df: pd.DataFrame, hoja: str) -> pd.DataFrame:
 
     carrera_col = CARRERA_COL_BY_HOJA.get(hoja)
     keep_text = set(["Modalidad"])
+
     if TIMESTAMP_COL in df.columns:
         keep_text.add(TIMESTAMP_COL)
         df[TIMESTAMP_COL] = pd.to_datetime(df[TIMESTAMP_COL], dayfirst=True, errors="coerce")
+
     if carrera_col and carrera_col in df.columns:
         keep_text.add(carrera_col)
 
@@ -243,7 +249,7 @@ def cargar_datos_procesados():
     sh = client.open_by_url(SPREADSHEET_URL_PROCESADO)
 
     data = {}
-    for etiqueta, hoja in HOJAS_NUM.items():
+    for _, hoja in HOJAS_NUM.items():
         df = leer_hoja_df(sh, hoja)
         data[hoja] = ensure_numeric_processed(df, hoja)
 
@@ -282,7 +288,7 @@ def render_encuesta_calidad(vista: str, carrera_seleccionada: str | None):
 
     data, df_com, df_log = cargar_datos_procesados()
 
-    # 1) Selector de modalidad (flujo obligatorio)
+    # 1) Modalidad -> hoja
     modalidad_ui = st.selectbox("Selecciona modalidad", list(HOJAS_NUM.keys()), index=0)
     hoja = HOJAS_NUM[modalidad_ui]
     df_base = data.get(hoja, pd.DataFrame())
@@ -291,7 +297,7 @@ def render_encuesta_calidad(vista: str, carrera_seleccionada: str | None):
         st.info(f"No hay datos en la hoja {hoja}.")
         return
 
-    # 2) Filtro de alcance (DG/DA) vs (Director)
+    # 2) Alcance (DG/DA) vs Director
     carrera_col = CARRERA_COL_BY_HOJA.get(hoja)
     carreras = carreras_disponibles(data)
 
@@ -303,22 +309,17 @@ def render_encuesta_calidad(vista: str, carrera_seleccionada: str | None):
             alcance = "UDL completa"
         carrera_filtro = None if alcance == "UDL completa" else alcance
     else:
-        # Director: filtrado automático por la carrera seleccionada en app.py
-        if carrera_col:
-            carrera_filtro = carrera_seleccionada
-        else:
-            carrera_filtro = None
+        carrera_filtro = carrera_seleccionada if carrera_col else None
 
     df = filtrar_por_carrera(df_base, hoja, carrera_filtro if carrera_filtro else "UDL completa")
 
     # KPIs permitidos
     total_respuestas = int(df.shape[0])
 
-    # promedio general (ponderado por respuestas válidas a nivel reactivo, usando diccionario)
     all_cols = []
     for _, (a, b) in SECCIONES_POR_HOJA[hoja].items():
         all_cols.extend(columnas_por_rango(df, a, b))
-    prom_general, n_valid = mean_ponderado_por_respuestas(df, all_cols)
+    prom_general, _nvalid = mean_ponderado_por_respuestas(df, all_cols)
 
     c1, c2 = st.columns(2)
     c1.metric("Total de respuestas", total_respuestas)
@@ -326,7 +327,7 @@ def render_encuesta_calidad(vista: str, carrera_seleccionada: str | None):
 
     st.divider()
 
-    # 3) Promedio por sección (obligatorio)
+    # 3) Promedio por sección
     st.subheader("Promedio por sección")
     df_sec = promedios_por_seccion(df, hoja)
     st.dataframe(
@@ -341,11 +342,29 @@ def render_encuesta_calidad(vista: str, carrera_seleccionada: str | None):
     )
     chart_barras_seccion(df_sec, "Promedio por sección (0–5)")
 
-    # 4) Drill-down obligatorio (sección -> reactivo)
+    # 4) Drill-down obligatorio
     st.subheader("Selecciona la sección evaluada")
-    seccion_sel = st.selectbox("Sección", list(SECCIONES_POR_HOJA[hoja].keys()), index=0)
+
+    # Lista solo secciones que tengan al menos 1 reactivo con válidas > 0
+    secciones_validas = []
+    for sec in SECCIONES_POR_HOJA[hoja].keys():
+        tmp = detalle_por_reactivo(df, hoja, sec)
+        if not tmp.empty:
+            secciones_validas.append(sec)
+
+    if not secciones_validas:
+        st.info("No hay secciones con respuestas válidas para el filtro actual.")
+        st.divider()
+        return
+
+    seccion_sel = st.selectbox("Sección", secciones_validas, index=0)
 
     df_det = detalle_por_reactivo(df, hoja, seccion_sel)
+
+    if df_det.empty:
+        st.info("No hay reactivos con respuestas válidas en esta sección para el filtro actual.")
+        st.divider()
+        return
 
     st.dataframe(
         df_det,
@@ -368,7 +387,6 @@ def render_encuesta_calidad(vista: str, carrera_seleccionada: str | None):
             st.info("No hay datos en la hoja Comentarios.")
         else:
             dfc = df_com.copy()
-            # aplicar filtro de carrera si existe columna homóloga
             if carrera_filtro and carrera_col and carrera_col in dfc.columns:
                 dfc = dfc[dfc[carrera_col].astype(str).str.strip() == str(carrera_filtro).strip()].copy()
             st.dataframe(dfc, use_container_width=True, hide_index=True)
@@ -381,3 +399,5 @@ def render_encuesta_calidad(vista: str, carrera_seleccionada: str | None):
             if carrera_filtro and carrera_col and carrera_col in dfl.columns:
                 dfl = dfl[dfl[carrera_col].astype(str).str.strip() == str(carrera_filtro).strip()].copy()
             st.dataframe(dfl, use_container_width=True, hide_index=True)
+
+    st.caption("Restricciones aplicadas: sin 'mejor/peor', sin rankings valorativos y sin lenguaje valorativo.")
