@@ -11,7 +11,6 @@ from google.oauth2.service_account import Credentials
 # ============================================================
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 
-# PROCESADO (el que me compartiste)
 SPREADSHEET_URL_PROCESADO = (
     "https://docs.google.com/spreadsheets/d/"
     "1zwa-cG8Bwn6IA0VBrW_gsIb-bB92nTpa2H5sS4LVvak/edit"
@@ -25,13 +24,12 @@ HOJAS_NUM = {
 HOJA_COMENTARIOS = "Comentarios"
 HOJA_LOG = "Log_conversion"
 
-# Encabezados base (según lo que me compartiste)
 CARRERA_COL_BY_HOJA = {
     "Virtual_num": "Selecciona el programa académico que estudias",
     "Escolar_num": "Carrera de procedencia",
-    "Prepa_num": None,  # Prepa no tiene carrera
+    "Prepa_num": None,
 }
-TIMESTAMP_COL = "Marca temporal"  # aparece en las 3
+TIMESTAMP_COL = "Marca temporal"
 
 # ============================================================
 # DICCIONARIO DE SECCIONES (RANGOS EXCEL) OBLIGATORIO
@@ -76,7 +74,7 @@ def excel_col_to_index(col: str) -> int:
             n = n * 26 + (ord(ch) - ord("A") + 1)
     return n - 1
 
-def columnas_por_rango(df: pd.DataFrame, start_col: str, end_col: str) -> list[str]:
+def columnas_por_rango(df: pd.DataFrame, start_col: str, end_col: str) -> list:
     i = excel_col_to_index(start_col)
     j = excel_col_to_index(end_col)
     if i > j:
@@ -89,14 +87,9 @@ def columnas_por_rango(df: pd.DataFrame, start_col: str, end_col: str) -> list[s
     return cols[i : j + 1]
 
 def numeric_series(s: pd.Series) -> pd.Series:
-    # PROCESADO: sin conversiones semánticas; lo no numérico -> NaN
     return pd.to_numeric(s, errors="coerce")
 
-def mean_ponderado_por_respuestas(df: pd.DataFrame, item_cols: list[str]) -> tuple[float, int]:
-    """
-    Promedio ponderado por respuestas válidas a nivel reactivo:
-    apila todos los valores numéricos de los reactivos y promedia.
-    """
+def mean_ponderado_por_respuestas(df: pd.DataFrame, item_cols: list) -> tuple:
     if not item_cols:
         return (np.nan, 0)
     arr = df[item_cols].apply(numeric_series).to_numpy().ravel()
@@ -122,15 +115,14 @@ def detalle_por_reactivo(df: pd.DataFrame, hoja: str, seccion: str) -> pd.DataFr
         ser = numeric_series(df[col])
         valid = ser.dropna()
         data.append({
-            "Reactivo": str(col),  # encabezado completo
+            "Reactivo": str(col),
             "Promedio": float(valid.mean()) if len(valid) else np.nan,
             "Respuestas válidas": int(valid.shape[0]),
         })
     df_det = pd.DataFrame(data)
 
-    # OCULTAR columnas sin datos (lo pediste)
+    # OCULTAR columnas sin datos (Respuestas válidas == 0)
     df_det = df_det[df_det["Respuestas válidas"] > 0].copy()
-
     return df_det
 
 def chart_barras_seccion(df_sec: pd.DataFrame, title: str):
@@ -171,7 +163,33 @@ def chart_barras_reactivos(df_det: pd.DataFrame, title: str):
     st.altair_chart(c, use_container_width=True)
 
 # ============================================================
-# CARGA SHEETS (PROCESADO)
+# CREDENCIALES: string JSON o dict (evita TypeError)
+# ============================================================
+def get_service_account_info():
+    """
+    Acepta:
+    - st.secrets["gcp_service_account_json"] como string JSON
+    - st.secrets["gcp_service_account_json"] como dict
+    - st.secrets["gcp_service_account"] como dict
+    """
+    if "gcp_service_account_json" in st.secrets:
+        v = st.secrets["gcp_service_account_json"]
+        if isinstance(v, str):
+            return json.loads(v)
+        if isinstance(v, dict):
+            return v
+
+    if "gcp_service_account" in st.secrets:
+        v = st.secrets["gcp_service_account"]
+        if isinstance(v, dict):
+            return v
+        if isinstance(v, str):
+            return json.loads(v)
+
+    raise KeyError("No se encontró un secreto válido: gcp_service_account_json o gcp_service_account")
+
+# ============================================================
+# GOOGLE SHEETS
 # ============================================================
 def _buscar_hoja(sh, nombre: str):
     objetivo = str(nombre).strip().lower()
@@ -184,7 +202,6 @@ def _buscar_hoja(sh, nombre: str):
     return None
 
 def leer_hoja_df(sh, nombre_hoja: str) -> pd.DataFrame:
-    ws = None
     try:
         ws = sh.worksheet(nombre_hoja)
     except Exception:
@@ -200,7 +217,7 @@ def leer_hoja_df(sh, nombre_hoja: str) -> pd.DataFrame:
     header = values[0]
     rows = values[1:]
 
-    # encabezados únicos
+    # encabezados únicos si se repiten
     counts = {}
     header_unique = []
     for h in header:
@@ -217,10 +234,6 @@ def leer_hoja_df(sh, nombre_hoja: str) -> pd.DataFrame:
     return df
 
 def ensure_numeric_processed(df: pd.DataFrame, hoja: str) -> pd.DataFrame:
-    """
-    PROCESADO: no conversiones de texto->número en Streamlit.
-    Solo coerción a numérico para columnas no-base.
-    """
     if df.empty:
         return df
 
@@ -243,8 +256,8 @@ def ensure_numeric_processed(df: pd.DataFrame, hoja: str) -> pd.DataFrame:
 
 @st.cache_data(ttl=120, show_spinner=False)
 def cargar_datos_procesados():
-    creds_dict = json.loads(st.secrets["gcp_service_account_json"])
-    creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+    creds_info = get_service_account_info()
+    creds = Credentials.from_service_account_info(creds_info, scopes=SCOPES)
     client = gspread.authorize(creds)
     sh = client.open_by_url(SPREADSHEET_URL_PROCESADO)
 
@@ -261,7 +274,7 @@ def cargar_datos_procesados():
 # ============================================================
 # FILTROS
 # ============================================================
-def filtrar_por_carrera(df: pd.DataFrame, hoja: str, carrera: str | None) -> pd.DataFrame:
+def filtrar_por_carrera(df: pd.DataFrame, hoja: str, carrera: str) -> pd.DataFrame:
     carrera_col = CARRERA_COL_BY_HOJA.get(hoja)
     if df.empty:
         return df
@@ -271,7 +284,7 @@ def filtrar_por_carrera(df: pd.DataFrame, hoja: str, carrera: str | None) -> pd.
         return df
     return df[df[carrera_col].astype(str).str.strip() == str(carrera).strip()].copy()
 
-def carreras_disponibles(data: dict) -> list[str]:
+def carreras_disponibles(data: dict) -> list:
     carreras = set()
     for hoja, df in data.items():
         col = CARRERA_COL_BY_HOJA.get(hoja)
@@ -283,7 +296,7 @@ def carreras_disponibles(data: dict) -> list[str]:
 # ============================================================
 # RENDER PRINCIPAL
 # ============================================================
-def render_encuesta_calidad(vista: str, carrera_seleccionada: str | None):
+def render_encuesta_calidad(vista: str, carrera_seleccionada):
     st.header("Encuesta de calidad")
 
     data, df_com, df_log = cargar_datos_procesados()
@@ -342,10 +355,8 @@ def render_encuesta_calidad(vista: str, carrera_seleccionada: str | None):
     )
     chart_barras_seccion(df_sec, "Promedio por sección (0–5)")
 
-    # 4) Drill-down obligatorio
+    # 4) Drill-down obligatorio (solo secciones con datos)
     st.subheader("Selecciona la sección evaluada")
-
-    # Lista solo secciones que tengan al menos 1 reactivo con válidas > 0
     secciones_validas = []
     for sec in SECCIONES_POR_HOJA[hoja].keys():
         tmp = detalle_por_reactivo(df, hoja, sec)
@@ -358,7 +369,6 @@ def render_encuesta_calidad(vista: str, carrera_seleccionada: str | None):
         return
 
     seccion_sel = st.selectbox("Sección", secciones_validas, index=0)
-
     df_det = detalle_por_reactivo(df, hoja, seccion_sel)
 
     if df_det.empty:
