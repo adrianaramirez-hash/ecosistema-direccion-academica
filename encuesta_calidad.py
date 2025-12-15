@@ -5,6 +5,7 @@ import altair as alt
 import gspread
 import json
 from google.oauth2.service_account import Credentials
+from collections.abc import Mapping
 
 # ============================================================
 # CONFIG (PROCESADO)
@@ -74,7 +75,7 @@ def excel_col_to_index(col: str) -> int:
             n = n * 26 + (ord(ch) - ord("A") + 1)
     return n - 1
 
-def columnas_por_rango(df: pd.DataFrame, start_col: str, end_col: str) -> list:
+def columnas_por_rango(df: pd.DataFrame, start_col: str, end_col: str) -> list[str]:
     i = excel_col_to_index(start_col)
     j = excel_col_to_index(end_col)
     if i > j:
@@ -89,7 +90,7 @@ def columnas_por_rango(df: pd.DataFrame, start_col: str, end_col: str) -> list:
 def numeric_series(s: pd.Series) -> pd.Series:
     return pd.to_numeric(s, errors="coerce")
 
-def mean_ponderado_por_respuestas(df: pd.DataFrame, item_cols: list) -> tuple:
+def mean_ponderado_por_respuestas(df: pd.DataFrame, item_cols: list[str]) -> tuple[float, int]:
     if not item_cols:
         return (np.nan, 0)
     arr = df[item_cols].apply(numeric_series).to_numpy().ravel()
@@ -119,9 +120,10 @@ def detalle_por_reactivo(df: pd.DataFrame, hoja: str, seccion: str) -> pd.DataFr
             "Promedio": float(valid.mean()) if len(valid) else np.nan,
             "Respuestas válidas": int(valid.shape[0]),
         })
+
     df_det = pd.DataFrame(data)
 
-    # OCULTAR columnas sin datos (Respuestas válidas == 0)
+    # OCULTAR reactivos sin datos (lo pediste)
     df_det = df_det[df_det["Respuestas válidas"] > 0].copy()
     return df_det
 
@@ -163,30 +165,35 @@ def chart_barras_reactivos(df_det: pd.DataFrame, title: str):
     st.altair_chart(c, use_container_width=True)
 
 # ============================================================
-# CREDENCIALES: string JSON o dict (evita TypeError)
+# SECRETS: robusto para string JSON / dict / Mapping (TOML section)
 # ============================================================
-def get_service_account_info():
+def _to_plain_dict(v):
+    if isinstance(v, Mapping):
+        return dict(v)
+    return v
+
+def get_service_account_info() -> dict:
     """
-    Acepta:
+    Soporta:
     - st.secrets["gcp_service_account_json"] como string JSON
-    - st.secrets["gcp_service_account_json"] como dict
-    - st.secrets["gcp_service_account"] como dict
+    - st.secrets["gcp_service_account_json"] como Mapping/dict
+    - st.secrets["gcp_service_account"] como Mapping/dict (formato recomendado en Streamlit)
     """
     if "gcp_service_account_json" in st.secrets:
-        v = st.secrets["gcp_service_account_json"]
+        v = _to_plain_dict(st.secrets["gcp_service_account_json"])
         if isinstance(v, str):
             return json.loads(v)
         if isinstance(v, dict):
             return v
 
     if "gcp_service_account" in st.secrets:
-        v = st.secrets["gcp_service_account"]
-        if isinstance(v, dict):
-            return v
+        v = _to_plain_dict(st.secrets["gcp_service_account"])
         if isinstance(v, str):
             return json.loads(v)
+        if isinstance(v, dict):
+            return v
 
-    raise KeyError("No se encontró un secreto válido: gcp_service_account_json o gcp_service_account")
+    raise KeyError("Secrets: falta gcp_service_account_json o gcp_service_account")
 
 # ============================================================
 # GOOGLE SHEETS
@@ -217,7 +224,6 @@ def leer_hoja_df(sh, nombre_hoja: str) -> pd.DataFrame:
     header = values[0]
     rows = values[1:]
 
-    # encabezados únicos si se repiten
     counts = {}
     header_unique = []
     for h in header:
@@ -274,7 +280,7 @@ def cargar_datos_procesados():
 # ============================================================
 # FILTROS
 # ============================================================
-def filtrar_por_carrera(df: pd.DataFrame, hoja: str, carrera: str) -> pd.DataFrame:
+def filtrar_por_carrera(df: pd.DataFrame, hoja: str, carrera: str | None) -> pd.DataFrame:
     carrera_col = CARRERA_COL_BY_HOJA.get(hoja)
     if df.empty:
         return df
@@ -284,24 +290,25 @@ def filtrar_por_carrera(df: pd.DataFrame, hoja: str, carrera: str) -> pd.DataFra
         return df
     return df[df[carrera_col].astype(str).str.strip() == str(carrera).strip()].copy()
 
-def carreras_disponibles(data: dict) -> list:
+def carreras_disponibles(data: dict) -> list[str]:
     carreras = set()
     for hoja, df in data.items():
         col = CARRERA_COL_BY_HOJA.get(hoja)
         if col and (not df.empty) and col in df.columns:
             carreras.update(df[col].dropna().astype(str).str.strip().tolist())
-    out = sorted([c for c in carreras if c])
-    return out
+    return sorted([c for c in carreras if c])
 
 # ============================================================
 # RENDER PRINCIPAL
 # ============================================================
-def render_encuesta_calidad(vista: str, carrera_seleccionada):
+def render_encuesta_calidad(vista: str, carrera_seleccionada: str | None):
     st.header("Encuesta de calidad")
+
+    # Si el caché guarda estado viejo, esto ayuda en despliegues:
+    # st.cache_data.clear()
 
     data, df_com, df_log = cargar_datos_procesados()
 
-    # 1) Modalidad -> hoja
     modalidad_ui = st.selectbox("Selecciona modalidad", list(HOJAS_NUM.keys()), index=0)
     hoja = HOJAS_NUM[modalidad_ui]
     df_base = data.get(hoja, pd.DataFrame())
@@ -310,7 +317,6 @@ def render_encuesta_calidad(vista: str, carrera_seleccionada):
         st.info(f"No hay datos en la hoja {hoja}.")
         return
 
-    # 2) Alcance (DG/DA) vs Director
     carrera_col = CARRERA_COL_BY_HOJA.get(hoja)
     carreras = carreras_disponibles(data)
 
@@ -326,7 +332,6 @@ def render_encuesta_calidad(vista: str, carrera_seleccionada):
 
     df = filtrar_por_carrera(df_base, hoja, carrera_filtro if carrera_filtro else "UDL completa")
 
-    # KPIs permitidos
     total_respuestas = int(df.shape[0])
 
     all_cols = []
@@ -340,7 +345,6 @@ def render_encuesta_calidad(vista: str, carrera_seleccionada):
 
     st.divider()
 
-    # 3) Promedio por sección
     st.subheader("Promedio por sección")
     df_sec = promedios_por_seccion(df, hoja)
     st.dataframe(
@@ -355,7 +359,6 @@ def render_encuesta_calidad(vista: str, carrera_seleccionada):
     )
     chart_barras_seccion(df_sec, "Promedio por sección (0–5)")
 
-    # 4) Drill-down obligatorio (solo secciones con datos)
     st.subheader("Selecciona la sección evaluada")
     secciones_validas = []
     for sec in SECCIONES_POR_HOJA[hoja].keys():
@@ -390,7 +393,6 @@ def render_encuesta_calidad(vista: str, carrera_seleccionada):
 
     st.divider()
 
-    # 5) Comentarios y Log (solo DG/DA)
     if vista in ("Dirección General", "Dirección Académica"):
         st.subheader("Comentarios")
         if df_com.empty:
