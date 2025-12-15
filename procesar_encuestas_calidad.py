@@ -95,6 +95,7 @@ def leer_hoja_a_dataframe(sh, nombre_hoja: str) -> pd.DataFrame:
     header = values[0]
     data = values[1:]
 
+    # headers únicos
     counts = {}
     header_unique = []
     for h in header:
@@ -106,8 +107,7 @@ def leer_hoja_a_dataframe(sh, nombre_hoja: str) -> pd.DataFrame:
             counts[base] += 1
             header_unique.append(f"{base}_{counts[base]}")
 
-    df = pd.DataFrame(data, columns=[c.strip() for c in header_unique])
-    return df
+    return pd.DataFrame(data, columns=[c.strip() for c in header_unique])
 
 def asegurar_datetime(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
@@ -122,8 +122,7 @@ def columnas_numericas_en_secciones(df: pd.DataFrame, modalidad: str) -> list[st
     secciones = SECCIONES_POR_MODALIDAD.get(modalidad, {})
     num_cols = []
     for _, (a, b) in secciones.items():
-        cols = cols_por_rango(df, a, b)
-        for c in cols:
+        for c in cols_por_rango(df, a, b):
             if c in df.columns:
                 s = pd.to_numeric(df[c], errors="coerce")
                 if s.notna().sum() > 0:
@@ -145,32 +144,32 @@ def promedios_por_seccion(df: pd.DataFrame, modalidad: str) -> pd.DataFrame:
     secciones = SECCIONES_POR_MODALIDAD.get(modalidad, {})
     rows = []
     if df.empty:
-        return pd.DataFrame(columns=["Sección", "Promedio", "Reactivos_usados", "Respuestas"])
+        return pd.DataFrame(columns=["Sección", "Respuestas", "Promedio_UDL", "Reactivos_usados"])
 
     for sec, (a, b) in secciones.items():
         cols = cols_por_rango(df, a, b)
-        cols_ok = []
         tmp = df.copy()
+
+        cols_ok = []
         for c in cols:
             if c in tmp.columns:
                 tmp[c] = pd.to_numeric(tmp[c], errors="coerce")
                 if tmp[c].notna().sum() > 0:
                     cols_ok.append(c)
 
-        val = float(tmp[cols_ok].mean(axis=1).mean()) if cols_ok else None
-        rows.append(
-            {
-                "Sección": sec,
-                "Promedio": val,
-                "Reactivos_usados": len(cols_ok),
-                "Respuestas": len(df),
-            }
-        )
+        prom = float(tmp[cols_ok].mean(axis=1).mean()) if cols_ok else None
+
+        rows.append({
+            "Sección": sec,
+            "Respuestas": int(len(df)),
+            "Promedio_UDL": prom,
+            "Reactivos_usados": int(len(cols_ok)),
+        })
 
     return pd.DataFrame(rows)
 
 def grafica_barras_secciones(df_sec: pd.DataFrame, titulo: str):
-    df_plot = df_sec.dropna(subset=["Promedio"]).copy()
+    df_plot = df_sec.dropna(subset=["Promedio_UDL"]).copy()
     if df_plot.empty:
         st.info("No hay promedios numéricos suficientes para graficar secciones.")
         return
@@ -180,10 +179,10 @@ def grafica_barras_secciones(df_sec: pd.DataFrame, titulo: str):
         .mark_bar()
         .encode(
             x=alt.X("Sección:N", sort="-y", title="Sección"),
-            y=alt.Y("Promedio:Q", title="Promedio (0–5)"),
-            tooltip=["Sección", "Promedio", "Reactivos_usados"],
+            y=alt.Y("Promedio_UDL:Q", title="Promedio (0–5)"),
+            tooltip=["Sección", "Promedio_UDL", "Reactivos_usados", "Respuestas"],
         )
-        .properties(height=320, title=titulo)
+        .properties(height=340, title=titulo)
     )
     st.altair_chart(chart, use_container_width=True)
 
@@ -194,9 +193,6 @@ def grafica_distribucion_carrera(df: pd.DataFrame, titulo: str):
     serie = df[COLUMNA_CARRERA].fillna("Sin carrera").astype(str)
     df_c = serie.value_counts().reset_index()
     df_c.columns = ["Carrera", "Respuestas"]
-
-    if df_c.empty:
-        return
 
     chart = (
         alt.Chart(df_c)
@@ -225,17 +221,16 @@ def cargar_procesado():
     df_v = asegurar_datetime(leer_hoja_a_dataframe(sh, SHEET_VIRTUAL))
     df_e = asegurar_datetime(leer_hoja_a_dataframe(sh, SHEET_ESCOLAR))
     df_p = asegurar_datetime(leer_hoja_a_dataframe(sh, SHEET_PREPA))
-
     df_com = leer_hoja_a_dataframe(sh, SHEET_COMENT)
     df_log = leer_hoja_a_dataframe(sh, SHEET_LOG)
 
     return df_v, df_e, df_p, df_com, df_log
 
 # ============================================================
-# UI: TAB POR MODALIDAD
+# RENDER: TAB MODALIDAD
 # ============================================================
 def render_tab_modalidad(vista: str, carrera: str | None, modalidad: str, df: pd.DataFrame):
-    st.subheader(f"Resultados – {modalidad.capitalize()}")
+    st.subheader(f"{modalidad.capitalize()}")
 
     if df.empty:
         st.warning("No hay datos en el PROCESADO para esta modalidad.")
@@ -245,7 +240,7 @@ def render_tab_modalidad(vista: str, carrera: str | None, modalidad: str, df: pd
     if vista == "Director de carrera" and carrera and COLUMNA_CARRERA in df_fil.columns:
         df_fil = df_fil[df_fil[COLUMNA_CARRERA].astype(str) == str(carrera)]
 
-    total = len(df_fil)
+    total = int(len(df_fil))
     prom = promedio_global(df_fil, modalidad)
 
     c1, c2 = st.columns(2)
@@ -258,24 +253,23 @@ def render_tab_modalidad(vista: str, carrera: str | None, modalidad: str, df: pd
 
     st.markdown("---")
 
-    df_sec = promedios_por_seccion(df_fil, modalidad)
     st.subheader("Promedio por sección")
+    df_sec = promedios_por_seccion(df_fil, modalidad)
     st.dataframe(df_sec, use_container_width=True)
     grafica_barras_secciones(df_sec, f"Promedio por sección – {modalidad.capitalize()}")
 
-    st.markdown("---")
-
     if vista in ("Dirección General", "Dirección Académica"):
+        st.markdown("---")
         st.subheader("Distribución de respuestas por carrera")
         grafica_distribucion_carrera(df_fil, f"Distribución por carrera – {modalidad.capitalize()}")
 
 # ============================================================
-# UI: TAB INSTITUCIONAL (POR MODALIDAD)
+# RENDER: INSTITUCIONAL POR MODALIDAD (comparativo)
 # ============================================================
-def render_tab_institucional_por_modalidad(vista: str, carrera: str | None, df_v, df_e, df_p, df_com):
+def render_institucional_por_modalidad(vista: str, carrera: str | None, df_v, df_e, df_p, df_com):
     st.subheader("Institucional UDL – Comparativo por modalidad")
 
-    # Filtro director (si aplica) sobre cada DF
+    # filtro director
     if vista == "Director de carrera" and carrera:
         if COLUMNA_CARRERA in df_v.columns:
             df_v = df_v[df_v[COLUMNA_CARRERA].astype(str) == str(carrera)]
@@ -284,70 +278,71 @@ def render_tab_institucional_por_modalidad(vista: str, carrera: str | None, df_v
         if COLUMNA_CARRERA in df_p.columns:
             df_p = df_p[df_p[COLUMNA_CARRERA].astype(str) == str(carrera)]
 
-    # KPIs por modalidad + promedio institucional ponderado
-    n_v, n_e, n_p = len(df_v), len(df_e), len(df_p)
+    n_v, n_e, n_p = int(len(df_v)), int(len(df_e)), int(len(df_p))
     p_v = promedio_global(df_v, "virtual")
     p_e = promedio_global(df_e, "escolar")
     p_p = promedio_global(df_p, "prepa")
 
-    numer = 0.0
-    denom = 0
+    # promedio institucional ponderado (solo KPI permitido)
+    numer, denom = 0.0, 0
     for p, n in [(p_v, n_v), (p_e, n_e), (p_p, n_p)]:
         if p is not None and n > 0:
             numer += p * n
             denom += n
     prom_inst = (numer / denom) if denom > 0 else None
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Respuestas totales", n_v + n_e + n_p)
+    c1, c2 = st.columns(2)
+    c1.metric("Respuestas totales (UDL)", n_v + n_e + n_p)
     c2.metric("Promedio general UDL (0–5)", f"{prom_inst:.2f}" if prom_inst is not None else "N/D")
-    c3.metric("Virtual – Respuestas / Promedio", f"{n_v} / {p_v:.2f}" if p_v is not None else f"{n_v} / N/D")
-    c4.metric("Escolar/Prepa – Respuestas / Promedio", f"{n_e + n_p} / N/D" if (p_e is None and p_p is None) else f"{n_e + n_p} / {( ( (p_e or 0)*n_e + (p_p or 0)*n_p ) / (n_e+n_p) ):.2f}" if (n_e+n_p)>0 else "0 / N/D")
 
     st.markdown("---")
 
-    # Promedios por sección, por modalidad (tabla y gráfica comparativa)
-    sec_v = promedios_por_seccion(df_v, "virtual")
-    sec_v["Modalidad"] = "virtual"
+    # tabla resumen por modalidad (sin “mejor/peor”)
+    df_res_mod = pd.DataFrame([
+        {"Modalidad": "virtual", "Respuestas": n_v, "Promedio_general": p_v},
+        {"Modalidad": "escolar", "Respuestas": n_e, "Promedio_general": p_e},
+        {"Modalidad": "prepa", "Respuestas": n_p, "Promedio_general": p_p},
+    ])
+    st.subheader("Resumen por modalidad")
+    st.dataframe(df_res_mod, use_container_width=True)
 
-    sec_e = promedios_por_seccion(df_e, "escolar")
-    sec_e["Modalidad"] = "escolar"
+    st.markdown("---")
 
-    sec_p = promedios_por_seccion(df_p, "prepa")
-    sec_p["Modalidad"] = "prepa"
+    # promedios por sección por modalidad
+    sec_v = promedios_por_seccion(df_v, "virtual"); sec_v["Modalidad"] = "virtual"
+    sec_e = promedios_por_seccion(df_e, "escolar"); sec_e["Modalidad"] = "escolar"
+    sec_p = promedios_por_seccion(df_p, "prepa");   sec_p["Modalidad"] = "prepa"
 
     df_sec_all = pd.concat([sec_v, sec_e, sec_p], ignore_index=True)
-    df_sec_all["Promedio"] = pd.to_numeric(df_sec_all["Promedio"], errors="coerce")
+    df_sec_all["Promedio_UDL"] = pd.to_numeric(df_sec_all["Promedio_UDL"], errors="coerce")
 
-    st.subheader("Promedio por sección – comparativo por modalidad")
+    st.subheader("Promedio por sección (comparativo por modalidad)")
     st.dataframe(df_sec_all, use_container_width=True)
 
-    df_plot = df_sec_all.dropna(subset=["Promedio"]).copy()
+    df_plot = df_sec_all.dropna(subset=["Promedio_UDL"]).copy()
     if not df_plot.empty:
         chart = (
             alt.Chart(df_plot)
             .mark_bar()
             .encode(
                 x=alt.X("Sección:N", sort="-y"),
-                y=alt.Y("Promedio:Q", title="Promedio (0–5)"),
+                y=alt.Y("Promedio_UDL:Q", title="Promedio (0–5)"),
                 color="Modalidad:N",
-                tooltip=["Modalidad", "Sección", "Promedio", "Reactivos_usados", "Respuestas"],
+                tooltip=["Modalidad", "Sección", "Promedio_UDL", "Reactivos_usados", "Respuestas"],
             )
             .properties(height=380, title="Promedio por sección y modalidad")
         )
         st.altair_chart(chart, use_container_width=True)
     else:
-        st.info("No hay promedios por sección suficientes para graficar.")
+        st.info("No hay datos numéricos suficientes para graficar el comparativo por sección.")
 
     st.markdown("---")
-
-    # Comentarios: solo muestra muestra
     st.subheader("Comentarios cualitativos (muestra)")
     if df_com.empty:
         st.info("No hay comentarios en la hoja Comentarios.")
     else:
         st.dataframe(df_com.head(200), use_container_width=True)
-        st.caption("Mostrando los primeros 200 registros. El total está en el archivo PROCESADO.")
+        st.caption("Mostrando los primeros 200 registros.")
 
 # ============================================================
 # ENTRADA PRINCIPAL
@@ -357,10 +352,16 @@ def render_encuesta_calidad(vista: str, carrera_seleccionada: str | None):
 
     df_v, df_e, df_p, df_com, df_log = cargar_procesado()
 
-    tabs = st.tabs(["Institucional (por modalidad)", "Virtual", "Escolar", "Prepa", "Log (diagnóstico)"])
+    tabs = st.tabs([
+        "Institucional (por modalidad)",
+        "Virtual",
+        "Escolar",
+        "Prepa",
+        "Log (diagnóstico)"
+    ])
 
     with tabs[0]:
-        render_tab_institucional_por_modalidad(vista, carrera_seleccionada, df_v, df_e, df_p, df_com)
+        render_institucional_por_modalidad(vista, carrera_seleccionada, df_v, df_e, df_p, df_com)
 
     with tabs[1]:
         render_tab_modalidad(vista, carrera_seleccionada, "virtual", df_v)
@@ -374,8 +375,8 @@ def render_encuesta_calidad(vista: str, carrera_seleccionada: str | None):
     with tabs[4]:
         st.subheader("Log de conversión (textos no reconocidos)")
         st.caption(
-            "Aquí aparecen textos de respuesta que no se pudieron convertir a número automáticamente. "
-            "Sirve para afinar el mapeo texto→número y mejorar el cálculo de promedios."
+            "Estos textos no se pudieron convertir a número automáticamente. "
+            "Sirve para ajustar el mapeo texto→número y mejorar promedios."
         )
         if df_log.empty:
             st.success("Sin registros en Log_conversion.")
