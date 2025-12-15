@@ -1,47 +1,39 @@
-import re
-import json
+import streamlit as st
 import pandas as pd
 import gspread
+import json
 from google.oauth2.service_account import Credentials
+import altair as alt
 
-# =========================
+# ============================================================
 # CONFIG
-# =========================
-SCOPES_RW = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
+# ============================================================
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets.readonly",
+    "https://www.googleapis.com/auth/drive.readonly",
 ]
 
-# ORIGINAL (fuente)
-ORIGINAL_URL = (
-    "https://docs.google.com/spreadsheets/d/"
-    "1WAk0Jv42MIyn0iImsAT2YuCsC8-YphKnFxgJYQZKjqU/edit"
-)
-
-# PROCESADO (destino) – el que creaste
-PROCESADO_URL = (
+# >>> PROCESADO (destino) <<<
+SPREADSHEET_PROCESADO_URL = (
     "https://docs.google.com/spreadsheets/d/"
     "1zwa-cG8Bwn6IA0VBrW_gsIb-bB92nTpa2H5sS4LVvak/edit"
 )
 
-SRC_VIRTUAL = "servicios virtual y mixto virtual"
-SRC_ESCOLAR = "servicios escolarizados y licenciaturas ejecutivas"
-SRC_PREPA = "Preparatoria"
-
-DST_VIRTUAL = "Virtual_num"
-DST_ESCOLAR = "Escolar_num"
-DST_PREPA = "Prepa_num"
-DST_RES_FORM = "Resumen_formularios"
-DST_RES_SEC = "Resumen_secciones"
-DST_COMENT = "Comentarios"
-DST_LOG = "Log_conversion"
+# Hojas en PROCESADO
+SHEET_VIRTUAL = "Virtual_num"
+SHEET_ESCOLAR = "Escolar_num"
+SHEET_PREPA = "Prepa_num"
+SHEET_RES_FORM = "Resumen_formularios"
+SHEET_RES_SEC = "Resumen_secciones"
+SHEET_COMENT = "Comentarios"
+SHEET_LOG = "Log_conversion"
 
 COLUMNA_TIMESTAMP = "Marca temporal"
 COLUMNA_CARRERA = "Carrera de procedencia"
 
-# =========================
-# SECCIONES (rangos Excel)
-# =========================
+# ============================================================
+# SECCIONES (rangos Excel, tal como los definiste)
+# ============================================================
 SECCIONES_POR_MODALIDAD = {
     "virtual": {
         "Director / Coordinador": ("C", "G"),
@@ -71,66 +63,12 @@ SECCIONES_POR_MODALIDAD = {
     },
 }
 
-# =========================
-# Conversión texto → número
-# =========================
-MAPA_TEXTO_A_NUM = {
-    "no lo utilizo": 0,
-    "no lo uso": 0,
-    "muy malo": 1,
-    "malo": 2,
-    "regular": 3,
-    "bueno": 4,
-    "excelente": 5,
-
-    "muy insatisfecho": 1,
-    "insatisfecho": 2,
-    "neutral": 3,
-    "satisfecho": 4,
-    "muy satisfecho": 5,
-
-    "sí": 5,
-    "si": 5,
-    "no": 1,
-
-    "n/a": None,
-    "na": None,
-    "no aplica": None,
-    "": None,
-}
-
-DIGIT_0_5 = re.compile(r"^\s*([0-5])\s*$")
-LEADING_DIGIT = re.compile(r"^\s*([0-5])\s*[-–—\.:]\s*.*$")  # "5 - Excelente"
-
-COMENTARIOS_HINTS = [
-    "¿por qué", "por qué", "porque", "por que",
-    "coment", "suger", "observ", "explica", "describe", "motivo",
-]
-
+# ============================================================
+# UTILIDADES
+# ============================================================
 def _norm(x) -> str:
     return "" if x is None else str(x).strip().lower()
 
-def es_columna_comentario(nombre_col: str) -> bool:
-    t = _norm(nombre_col)
-    return any(h in t for h in COMENTARIOS_HINTS)
-
-def convertir_valor_a_num(v):
-    t = _norm(v)
-    if t in ("", "nan", "none"):
-        return None
-    m = DIGIT_0_5.match(t)
-    if m:
-        return float(m.group(1))
-    m2 = LEADING_DIGIT.match(t)
-    if m2:
-        return float(m2.group(1))
-    if t in MAPA_TEXTO_A_NUM:
-        return MAPA_TEXTO_A_NUM[t]
-    return None
-
-# =========================
-# Excel col → índice
-# =========================
 def excel_col_to_index(col: str) -> int:
     col = col.strip().upper()
     n = 0
@@ -147,27 +85,15 @@ def cols_por_rango(df: pd.DataFrame, a: str, b: str) -> list[str]:
     cols = list(df.columns)
     i = max(i, 0)
     j = min(j, len(cols) - 1)
-    return cols[i:j+1]
+    return cols[i : j + 1]
 
-# =========================
-# Sheets IO
-# =========================
-def _buscar_hoja_flexible(sh, nombre: str):
-    objetivo = _norm(nombre)
-    for ws in sh.worksheets():
-        if _norm(ws.title) == objetivo:
-            return ws
-    for ws in sh.worksheets():
-        if objetivo in _norm(ws.title):
-            return ws
-    return None
-
-def leer_sheet_df(sh, nombre_hoja: str) -> pd.DataFrame:
+def leer_hoja_a_dataframe(sh, nombre_hoja: str) -> pd.DataFrame:
+    """
+    Lee una hoja con get_all_values y vuelve headers únicos.
+    """
     try:
         ws = sh.worksheet(nombre_hoja)
     except Exception:
-        ws = _buscar_hoja_flexible(sh, nombre_hoja)
-    if ws is None:
         return pd.DataFrame()
 
     values = ws.get_all_values()
@@ -177,7 +103,6 @@ def leer_sheet_df(sh, nombre_hoja: str) -> pd.DataFrame:
     header = values[0]
     data = values[1:]
 
-    # headers únicos
     counts = {}
     header_unique = []
     for h in header:
@@ -192,216 +117,326 @@ def leer_sheet_df(sh, nombre_hoja: str) -> pd.DataFrame:
     df = pd.DataFrame(data, columns=[c.strip() for c in header_unique])
     return df
 
-def asegurar_worksheet(sh, title: str, rows=2000, cols=200):
-    try:
-        return sh.worksheet(title)
-    except Exception:
-        return sh.add_worksheet(title=title, rows=rows, cols=cols)
-
-def escribir_df(ws, df: pd.DataFrame):
+def asegurar_datetime(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Escritura robusta:
-    - Convierte columnas datetime a string (evita 'Timestamp is not JSON serializable')
-    - Convierte todo a tipos serializables
-    - Reemplaza NaN por ""
-    """
-    ws.clear()
-    if df.empty:
-        ws.update([["(sin datos)"]])
-        return
-
-    df_out = df.copy()
-
-    # 1) Datetimes -> string
-    for col in df_out.columns:
-        if pd.api.types.is_datetime64_any_dtype(df_out[col]):
-            df_out[col] = df_out[col].dt.strftime("%Y-%m-%d %H:%M:%S")
-
-    # 2) NaN -> ""
-    df_out = df_out.astype(object).where(pd.notna(df_out), "")
-
-    # 3) Asegurar serialización: números se quedan; lo demás se vuelve string
-    def _safe(x):
-        if isinstance(x, (int, float)):
-            return x
-        return str(x)
-
-    df_out = df_out.applymap(_safe)
-
-    values = [df_out.columns.tolist()] + df_out.values.tolist()
-    ws.update(values)
-
-# =========================
-# Procesamiento
-# =========================
-def convertir_df_a_numerico(df: pd.DataFrame, modalidad: str):
-    """
-    Convierte SOLO reactivos dentro de los rangos de secciones.
-    Regresa df convertido + log de textos desconocidos.
+    En PROCESADO, 'Marca temporal' se guardó como string.
+    Lo convertimos a datetime para filtros.
     """
     if df.empty:
-        return df, pd.DataFrame(columns=["Modalidad", "Columna", "Texto_no_reconocido", "Conteo"])
-
-    df = df.copy()
-    df.columns = [c.strip() for c in df.columns]
-
-    # timestamp a datetime (para filtrar/ordenar; al escribir lo convertimos a string)
+        return df
     if COLUMNA_TIMESTAMP in df.columns:
-        df[COLUMNA_TIMESTAMP] = pd.to_datetime(df[COLUMNA_TIMESTAMP], dayfirst=True, errors="coerce")
+        df[COLUMNA_TIMESTAMP] = pd.to_datetime(df[COLUMNA_TIMESTAMP], errors="coerce")
+    return df
 
+def detectar_modalidad_por_tab(tab_name: str) -> str:
+    t = _norm(tab_name)
+    if "virtual" in t:
+        return "virtual"
+    if "escolar" in t:
+        return "escolar"
+    if "prepa" in t:
+        return "prepa"
+    return "desconocida"
+
+def columnas_numericas_en_secciones(df: pd.DataFrame, modalidad: str) -> list[str]:
+    """
+    Devuelve columnas numéricas dentro de los rangos definidos por sección.
+    """
+    if df.empty:
+        return []
     secciones = SECCIONES_POR_MODALIDAD.get(modalidad, {})
-    cols_en_secciones = []
+    num_cols = []
     for _, (a, b) in secciones.items():
-        cols_en_secciones.extend(cols_por_rango(df, a, b))
-    cols_en_secciones = list(dict.fromkeys(cols_en_secciones))
-
-    log_rows = []
-
-    for col in cols_en_secciones:
-        if col not in df.columns:
-            continue
-        if es_columna_comentario(col):
-            continue
-
-        originales = df[col].astype(str).fillna("").tolist()
-        convertidos = []
-
-        for v in originales:
-            convertidos.append(convertir_valor_a_num(v))
-
-            t = _norm(v)
-            if t in ("", "nan", "none"):
-                continue
-            if DIGIT_0_5.match(t) or LEADING_DIGIT.match(t) or (t in MAPA_TEXTO_A_NUM):
-                continue
-            log_rows.append((modalidad, col, v))
-
-        ser_num = pd.to_numeric(pd.Series(convertidos), errors="coerce")
-        if ser_num.notna().sum() > 0:
-            df[col] = ser_num
-
-    df["Modalidad"] = modalidad
-
-    if log_rows:
-        dflog = pd.DataFrame(log_rows, columns=["Modalidad", "Columna", "Texto_no_reconocido"])
-        dflog = dflog.value_counts().reset_index(name="Conteo")
-    else:
-        dflog = pd.DataFrame(columns=["Modalidad", "Columna", "Texto_no_reconocido", "Conteo"])
-
-    return df, dflog
-
-def resumen_formularios(df_v, df_e, df_p):
-    def prom(df, modalidad):
-        if df.empty:
-            return None
-        secciones = SECCIONES_POR_MODALIDAD.get(modalidad, {})
-        num_cols = []
-        for _, (a, b) in secciones.items():
-            cols = cols_por_rango(df, a, b)
-            for c in cols:
-                if c in df.columns and pd.api.types.is_numeric_dtype(df[c]) and df[c].notna().sum() > 0:
+        cols = cols_por_rango(df, a, b)
+        for c in cols:
+            if c in df.columns:
+                # intentamos a numeric (muchas columnas vienen como str desde Sheets)
+                s = pd.to_numeric(df[c], errors="coerce")
+                if s.notna().sum() > 0:
                     num_cols.append(c)
-        num_cols = list(dict.fromkeys(num_cols))
-        if not num_cols:
-            return None
-        return float(df[num_cols].mean(axis=1).mean())
+    return list(dict.fromkeys(num_cols))
 
-    return pd.DataFrame([
-        {"Formulario": "Virtual y Mixto Virtual", "Modalidad": "virtual", "Respuestas": len(df_v), "Promedio": prom(df_v, "virtual")},
-        {"Formulario": "Escolarizados y Lic. Ejecutivas", "Modalidad": "escolar", "Respuestas": len(df_e), "Promedio": prom(df_e, "escolar")},
-        {"Formulario": "Preparatoria", "Modalidad": "prepa", "Respuestas": len(df_p), "Promedio": prom(df_p, "prepa")},
-    ])
+def promedio_global(df: pd.DataFrame, modalidad: str) -> float | None:
+    if df.empty:
+        return None
+    num_cols = columnas_numericas_en_secciones(df, modalidad)
+    if not num_cols:
+        return None
+    tmp = df.copy()
+    for c in num_cols:
+        tmp[c] = pd.to_numeric(tmp[c], errors="coerce")
+    return float(tmp[num_cols].mean(axis=1).mean())
 
-def resumen_secciones(df, modalidad: str):
+def promedios_por_seccion(df: pd.DataFrame, modalidad: str) -> pd.DataFrame:
+    """
+    Calcula promedio por sección usando los rangos definidos.
+    Robusto: si una sección no tiene columnas numéricas válidas -> Promedio = NaN.
+    """
     secciones = SECCIONES_POR_MODALIDAD.get(modalidad, {})
     rows = []
+    if df.empty:
+        return pd.DataFrame(columns=["Sección", "Promedio", "Reactivos_usados"])
+
     for sec, (a, b) in secciones.items():
         cols = cols_por_rango(df, a, b)
-        num_cols = [c for c in cols if c in df.columns and pd.api.types.is_numeric_dtype(df[c]) and df[c].notna().sum() > 0]
-        val = float(df[num_cols].mean(axis=1).mean()) if num_cols else None
-        rows.append({
-            "Modalidad": modalidad,
-            "Sección": sec,
-            "Promedio": val,
-            "Reactivos_usados": len(num_cols),
-            "Respuestas": len(df),
-        })
-    return pd.DataFrame(rows)
+        cols_ok = []
+        tmp = df.copy()
+        for c in cols:
+            if c in tmp.columns:
+                tmp[c] = pd.to_numeric(tmp[c], errors="coerce")
+                if tmp[c].notna().sum() > 0:
+                    cols_ok.append(c)
 
-def extraer_comentarios(df: pd.DataFrame):
-    if df.empty:
-        return pd.DataFrame()
-    cols_com = [c for c in df.columns if es_columna_comentario(c)]
-    base = [c for c in [COLUMNA_TIMESTAMP, COLUMNA_CARRERA] if c in df.columns]
-    keep = list(dict.fromkeys(["Modalidad"] + base + cols_com))
-    if not keep:
-        return pd.DataFrame()
-    return df[keep].copy()
+        if cols_ok:
+            val = float(tmp[cols_ok].mean(axis=1).mean())
+        else:
+            val = None
 
-# =========================
-# MAIN
-# =========================
-def main(service_account_json: str):
-    creds_dict = json.loads(service_account_json)
-    creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES_RW)
+        rows.append({"Sección": sec, "Promedio": val, "Reactivos_usados": len(cols_ok)})
+
+    out = pd.DataFrame(rows)
+    return out
+
+def grafica_barras_secciones(df_sec: pd.DataFrame, titulo: str):
+    df_plot = df_sec.dropna(subset=["Promedio"]).copy()
+    if df_plot.empty:
+        st.info("No hay promedios numéricos suficientes para graficar secciones.")
+        return
+
+    chart = (
+        alt.Chart(df_plot)
+        .mark_bar()
+        .encode(
+            x=alt.X("Sección:N", sort="-y", title="Sección"),
+            y=alt.Y("Promedio:Q", title="Promedio"),
+            tooltip=["Sección", "Promedio", "Reactivos_usados"],
+        )
+        .properties(height=320, title=titulo)
+    )
+    st.altair_chart(chart, use_container_width=True)
+
+def grafica_distribucion_carrera(df: pd.DataFrame, titulo: str):
+    if df.empty or COLUMNA_CARRERA not in df.columns:
+        return
+
+    serie = df[COLUMNA_CARRERA].fillna("Sin carrera").astype(str)
+    df_c = serie.value_counts().reset_index()
+    df_c.columns = ["Carrera", "Respuestas"]
+
+    if df_c.empty:
+        return
+
+    chart = (
+        alt.Chart(df_c)
+        .mark_bar()
+        .encode(
+            x=alt.X("Carrera:N", sort="-y", title="Carrera"),
+            y=alt.Y("Respuestas:Q", title="Respuestas"),
+            tooltip=["Carrera", "Respuestas"],
+        )
+        .properties(height=320, title=titulo)
+    )
+    st.altair_chart(chart, use_container_width=True)
+    st.dataframe(df_c, use_container_width=True)
+
+# ============================================================
+# CARGA DE DATOS (PROCESADO)
+# ============================================================
+@st.cache_data(ttl=120)
+def cargar_procesado():
+    creds_dict = json.loads(st.secrets["gcp_service_account_json"])
+    creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
     client = gspread.authorize(creds)
 
-    sh_src = client.open_by_url(ORIGINAL_URL)
-    sh_dst = client.open_by_url(PROCESADO_URL)
+    sh = client.open_by_url(SPREADSHEET_PROCESADO_URL)
 
-    raw_v = leer_sheet_df(sh_src, SRC_VIRTUAL)
-    raw_e = leer_sheet_df(sh_src, SRC_ESCOLAR)
-    raw_p = leer_sheet_df(sh_src, SRC_PREPA)
+    df_v = leer_hoja_a_dataframe(sh, SHEET_VIRTUAL)
+    df_e = leer_hoja_a_dataframe(sh, SHEET_ESCOLAR)
+    df_p = leer_hoja_a_dataframe(sh, SHEET_PREPA)
 
-    df_v, log_v = convertir_df_a_numerico(raw_v, "virtual")
-    df_e, log_e = convertir_df_a_numerico(raw_e, "escolar")
-    df_p, log_p = convertir_df_a_numerico(raw_p, "prepa")
+    df_rf = leer_hoja_a_dataframe(sh, SHEET_RES_FORM)
+    df_rs = leer_hoja_a_dataframe(sh, SHEET_RES_SEC)
 
-    df_res_form = resumen_formularios(df_v, df_e, df_p)
-    df_res_sec = pd.concat(
-        [resumen_secciones(df_v, "virtual"),
-         resumen_secciones(df_e, "escolar"),
-         resumen_secciones(df_p, "prepa")],
-        ignore_index=True
-    )
+    df_com = leer_hoja_a_dataframe(sh, SHEET_COMENT)
+    df_log = leer_hoja_a_dataframe(sh, SHEET_LOG)
 
-    df_com = pd.concat(
-        [extraer_comentarios(df_v), extraer_comentarios(df_e), extraer_comentarios(df_p)],
-        ignore_index=True
-    )
+    # normalizar fechas
+    df_v = asegurar_datetime(df_v)
+    df_e = asegurar_datetime(df_e)
+    df_p = asegurar_datetime(df_p)
 
-    df_log = pd.concat([log_v, log_e, log_p], ignore_index=True)
-    if df_log.empty:
-        df_log = pd.DataFrame([{
-            "Modalidad": "",
-            "Columna": "",
-            "Texto_no_reconocido": "SIN_TEXTOS_NO_RECONOCIDOS",
-            "Conteo": 0
-        }])
+    return df_v, df_e, df_p, df_rf, df_rs, df_com, df_log
 
-    # asegurar hojas destino
-    ws_v = asegurar_worksheet(sh_dst, DST_VIRTUAL)
-    ws_e = asegurar_worksheet(sh_dst, DST_ESCOLAR)
-    ws_p = asegurar_worksheet(sh_dst, DST_PREPA)
-    ws_rf = asegurar_worksheet(sh_dst, DST_RES_FORM)
-    ws_rs = asegurar_worksheet(sh_dst, DST_RES_SEC)
-    ws_c = asegurar_worksheet(sh_dst, DST_COMENT)
-    ws_l = asegurar_worksheet(sh_dst, DST_LOG)
+# ============================================================
+# UI: TAB POR MODALIDAD
+# ============================================================
+def render_tab_modalidad(vista: str, carrera: str | None, modalidad: str, df: pd.DataFrame):
+    st.subheader(f"Resultados – {modalidad.capitalize()}")
 
-    # escribir
-    escribir_df(ws_v, df_v)
-    escribir_df(ws_e, df_e)
-    escribir_df(ws_p, df_p)
-    escribir_df(ws_rf, df_res_form)
-    escribir_df(ws_rs, df_res_sec)
-    escribir_df(ws_c, df_com)
-    escribir_df(ws_l, df_log)
+    if df.empty:
+        st.warning("No hay datos en el PROCESADO para esta modalidad.")
+        return
 
-    # Regresa un resumen simple (serializable)
-    return {
-        "virtual_rows": int(len(df_v)),
-        "escolar_rows": int(len(df_e)),
-        "prepa_rows": int(len(df_p)),
-        "comentarios_rows": int(len(df_com)),
-        "log_rows": int(len(df_log)),
-    }
+    # Filtro por carrera para Directores
+    df_fil = df.copy()
+    if vista == "Director de carrera" and carrera and COLUMNA_CARRERA in df_fil.columns:
+        df_fil = df_fil[df_fil[COLUMNA_CARRERA].astype(str) == str(carrera)]
+
+    # KPI
+    total = len(df_fil)
+    prom = promedio_global(df_fil, modalidad)
+
+    c1, c2 = st.columns(2)
+    c1.metric("Respuestas", total)
+    c2.metric("Promedio general (0–5)", f"{prom:.2f}" if prom is not None else "N/D")
+
+    if total == 0:
+        st.warning("No hay respuestas para el filtro actual.")
+        return
+
+    st.markdown("---")
+
+    # Promedios por sección
+    df_sec = promedios_por_seccion(df_fil, modalidad)
+    st.subheader("Promedio por sección")
+    st.dataframe(df_sec, use_container_width=True)
+    grafica_barras_secciones(df_sec, f"Promedio por sección – {modalidad.capitalize()}")
+
+    st.markdown("---")
+
+    # Distribución por carrera (solo DG/DA; a directores no les aporta)
+    if vista in ("Dirección General", "Dirección Académica"):
+        st.subheader("Distribución de respuestas por carrera")
+        grafica_distribucion_carrera(df_fil, f"Distribución por carrera – {modalidad.capitalize()}")
+
+    # Comentarios (si existen en df)
+    # En tu PROCESADO, los comentarios se guardan en la hoja Comentarios, no aquí.
+    st.caption("Nota: Los comentarios cualitativos se consultan en la pestaña 'Comentarios' del archivo PROCESADO.")
+
+# ============================================================
+# UI: TAB INSTITUCIONAL
+# ============================================================
+def render_tab_institucional(vista: str, carrera: str | None, df_v, df_e, df_p, df_rf, df_rs, df_com):
+    st.subheader("Institucional UDL (todas las modalidades)")
+
+    # Unir para visión global
+    df_all = pd.concat([df_v, df_e, df_p], ignore_index=True)
+
+    # Para directores, filtramos por carrera si existe la columna
+    if vista == "Director de carrera" and carrera and COLUMNA_CARRERA in df_all.columns:
+        df_all = df_all[df_all[COLUMNA_CARRERA].astype(str) == str(carrera)]
+
+    total = len(df_all)
+
+    # Promedio institucional: promedio de promedios ponderado por filas de cada modalidad filtrada
+    prom_v = promedio_global(df_v if vista != "Director de carrera" else df_v[df_v.get(COLUMNA_CARRERA, "").astype(str) == str(carrera)] if (carrera and COLUMNA_CARRERA in df_v.columns) else df_v, "virtual")
+    prom_e = promedio_global(df_e if vista != "Director de carrera" else df_e[df_e.get(COLUMNA_CARRERA, "").astype(str) == str(carrera)] if (carrera and COLUMNA_CARRERA in df_e.columns) else df_e, "escolar")
+    prom_p = promedio_global(df_p if vista != "Director de carrera" else df_p[df_p.get(COLUMNA_CARRERA, "").astype(str) == str(carrera)] if (carrera and COLUMNA_CARRERA in df_p.columns) else df_p, "prepa")
+
+    # Ponderación por número de filas con el filtro aplicado
+    n_v = len(df_v if vista != "Director de carrera" else df_all[df_all.get("Modalidad", "").astype(str) == "virtual"])
+    n_e = len(df_e if vista != "Director de carrera" else df_all[df_all.get("Modalidad", "").astype(str) == "escolar"])
+    n_p = len(df_p if vista != "Director de carrera" else df_all[df_all.get("Modalidad", "").astype(str) == "prepa"])
+
+    numer = 0.0
+    denom = 0
+    for p, n in [(prom_v, n_v), (prom_e, n_e), (prom_p, n_p)]:
+        if p is not None and n > 0:
+            numer += p * n
+            denom += n
+    prom_inst = (numer / denom) if denom > 0 else None
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Respuestas totales", total)
+    c2.metric("Promedio institucional (0–5)", f"{prom_inst:.2f}" if prom_inst is not None else "N/D")
+    c3.metric("Modalidades incluidas", "Virtual + Escolar + Prepa")
+
+    st.markdown("---")
+
+    # Resumen por formularios (si existe tabla precomputada)
+    st.subheader("Resumen por modalidad")
+    if not df_rf.empty and all(c in df_rf.columns for c in ["Formulario", "Respuestas", "Promedio"]):
+        st.dataframe(df_rf, use_container_width=True)
+    else:
+        st.info("No se encontró 'Resumen_formularios' con columnas esperadas (Formulario/Respuestas/Promedio).")
+
+    st.markdown("---")
+
+    # Promedio institucional por sección (usamos Resumen_secciones como base)
+    st.subheader("Promedio UDL por sección (por modalidad)")
+    if not df_rs.empty and all(c in df_rs.columns for c in ["Modalidad", "Sección", "Promedio"]):
+        # Asegurar num
+        df_rs2 = df_rs.copy()
+        df_rs2["Promedio"] = pd.to_numeric(df_rs2["Promedio"], errors="coerce")
+
+        st.dataframe(df_rs2, use_container_width=True)
+
+        # Gráfica comparativa por modalidad
+        df_plot = df_rs2.dropna(subset=["Promedio"]).copy()
+        if not df_plot.empty:
+            chart = (
+                alt.Chart(df_plot)
+                .mark_bar()
+                .encode(
+                    x=alt.X("Sección:N", sort="-y"),
+                    y=alt.Y("Promedio:Q"),
+                    color="Modalidad:N",
+                    tooltip=["Modalidad", "Sección", "Promedio"],
+                )
+                .properties(height=360, title="Promedio por sección y modalidad")
+            )
+            st.altair_chart(chart, use_container_width=True)
+        else:
+            st.info("No hay promedios por sección suficientes para graficar.")
+    else:
+        st.info("No se encontró 'Resumen_secciones' con columnas esperadas (Modalidad/Sección/Promedio).")
+
+    st.markdown("---")
+
+    # Distribución por carrera (DG/DA)
+    if vista in ("Dirección General", "Dirección Académica"):
+        st.subheader("Distribución total por carrera (todas las modalidades)")
+        grafica_distribucion_carrera(df_all, "Distribución por carrera – Institucional")
+
+    # Comentarios
+    st.markdown("---")
+    st.subheader("Comentarios cualitativos (muestra)")
+    if df_com.empty:
+        st.info("No hay comentarios en la hoja Comentarios.")
+    else:
+        st.dataframe(df_com.head(200), use_container_width=True)
+        st.caption("Mostrando los primeros 200 registros. El total está en el archivo PROCESADO.")
+
+# ============================================================
+# ENTRADA PRINCIPAL
+# ============================================================
+def render_encuesta_calidad(vista: str, carrera_seleccionada: str | None):
+    st.header("Encuesta de calidad – Resultados (desde PROCESADO)")
+
+    df_v, df_e, df_p, df_rf, df_rs, df_com, df_log = cargar_procesado()
+
+    # Tabs
+    tabs = st.tabs(["Institucional UDL", "Virtual", "Escolar", "Prepa", "Log (diagnóstico)"])
+
+    with tabs[0]:
+        render_tab_institucional(vista, carrera_seleccionada, df_v, df_e, df_p, df_rf, df_rs, df_com)
+
+    with tabs[1]:
+        render_tab_modalidad(vista, carrera_seleccionada, "virtual", df_v)
+
+    with tabs[2]:
+        render_tab_modalidad(vista, carrera_seleccionada, "escolar", df_e)
+
+    with tabs[3]:
+        render_tab_modalidad(vista, carrera_seleccionada, "prepa", df_p)
+
+    with tabs[4]:
+        st.subheader("Log de conversión (textos no reconocidos)")
+        st.caption(
+            "Esta pestaña sirve para afinar el diccionario de conversión texto→número. "
+            "Si ves muchos valores aquí, significa que las opciones del formulario vienen con textos distintos."
+        )
+        if df_log.empty:
+            st.success("Sin registros en Log_conversion.")
+        else:
+            st.dataframe(df_log, use_container_width=True)
