@@ -1,8 +1,9 @@
 import streamlit as st
 import observacion_clases
 import encuesta_calidad
+import procesar_encuestas_calidad as proc  # <-- NUEVO
 
-# Configuración básica de la página
+# Configuración básica de la página (debe ir antes de cualquier st.*)
 st.set_page_config(page_title="Dirección Académica", layout="wide")
 
 # Escudo de la UDL desde el repositorio
@@ -17,6 +18,27 @@ with col1:
 with col2:
     st.title("Dirección Académica")
     st.write("Seguimiento del Plan Anual.")
+
+st.divider()
+
+# ============================================================
+# BOTÓN PARA PROCESAR ENCUESTAS (ORIGINAL → PROCESADO)
+# ============================================================
+with st.expander("Inicialización de encuestas (solo administración)", expanded=False):
+    st.caption(
+        "Usa este botón para convertir respuestas de texto a números y llenar el archivo PROCESADO. "
+        "Solo se requiere cuando haya nuevas respuestas."
+    )
+
+    if st.button("🔄 Procesar encuestas (ORIGINAL → PROCESADO)"):
+        try:
+            with st.spinner("Procesando encuestas, espera por favor..."):
+                resultado = proc.main(st.secrets["gcp_service_account_json"])
+            st.success("Proceso terminado correctamente")
+            st.json(resultado)
+        except Exception as e:
+            st.error("Falló el procesamiento. Copia el error completo para revisarlo.")
+            st.exception(e)
 
 st.divider()
 
