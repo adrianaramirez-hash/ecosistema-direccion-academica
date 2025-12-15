@@ -82,14 +82,17 @@ MAPA_TEXTO_A_NUM = {
     "regular": 3,
     "bueno": 4,
     "excelente": 5,
+
     "muy insatisfecho": 1,
     "insatisfecho": 2,
     "neutral": 3,
     "satisfecho": 4,
     "muy satisfecho": 5,
+
     "sí": 5,
     "si": 5,
     "no": 1,
+
     "n/a": None,
     "na": None,
     "no aplica": None,
@@ -174,7 +177,7 @@ def leer_sheet_df(sh, nombre_hoja: str) -> pd.DataFrame:
     header = values[0]
     data = values[1:]
 
-    # headers únicos (evita problemas)
+    # headers únicos
     counts = {}
     header_unique = []
     for h in header:
@@ -196,14 +199,34 @@ def asegurar_worksheet(sh, title: str, rows=2000, cols=200):
         return sh.add_worksheet(title=title, rows=rows, cols=cols)
 
 def escribir_df(ws, df: pd.DataFrame):
+    """
+    Escritura robusta:
+    - Convierte columnas datetime a string (evita 'Timestamp is not JSON serializable')
+    - Convierte todo a tipos serializables
+    - Reemplaza NaN por ""
+    """
     ws.clear()
     if df.empty:
         ws.update([["(sin datos)"]])
         return
 
     df_out = df.copy()
-    # Google Sheets no acepta NaN, los pasamos a ""
+
+    # 1) Datetimes -> string
+    for col in df_out.columns:
+        if pd.api.types.is_datetime64_any_dtype(df_out[col]):
+            df_out[col] = df_out[col].dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    # 2) NaN -> ""
     df_out = df_out.astype(object).where(pd.notna(df_out), "")
+
+    # 3) Asegurar serialización: números se quedan; lo demás se vuelve string
+    def _safe(x):
+        if isinstance(x, (int, float)):
+            return x
+        return str(x)
+
+    df_out = df_out.applymap(_safe)
 
     values = [df_out.columns.tolist()] + df_out.values.tolist()
     ws.update(values)
@@ -222,7 +245,7 @@ def convertir_df_a_numerico(df: pd.DataFrame, modalidad: str):
     df = df.copy()
     df.columns = [c.strip() for c in df.columns]
 
-    # timestamp
+    # timestamp a datetime (para filtrar/ordenar; al escribir lo convertimos a string)
     if COLUMNA_TIMESTAMP in df.columns:
         df[COLUMNA_TIMESTAMP] = pd.to_datetime(df[COLUMNA_TIMESTAMP], dayfirst=True, errors="coerce")
 
@@ -242,6 +265,7 @@ def convertir_df_a_numerico(df: pd.DataFrame, modalidad: str):
 
         originales = df[col].astype(str).fillna("").tolist()
         convertidos = []
+
         for v in originales:
             convertidos.append(convertir_valor_a_num(v))
 
@@ -373,16 +397,11 @@ def main(service_account_json: str):
     escribir_df(ws_c, df_com)
     escribir_df(ws_l, df_log)
 
-    print("OK. Filas escritas:")
-    print({"virtual": len(df_v), "escolar": len(df_e), "prepa": len(df_p), "comentarios": len(df_com), "log": len(df_log)})
-
-# Ejecución local:
-# 1) Exporta tu JSON como variable de entorno o pégalo en un archivo.
-# 2) Llama main(<json_string>)
-if __name__ == "__main__":
-    # Si lo ejecutas fuera de Streamlit, pega aquí el JSON del service account
-    # o cárgalo desde un archivo y pásalo como string.
-    raise SystemExit(
-        "Ejecuta main(service_account_json) desde tu entorno. "
-        "Ejemplo: main(open('service_account.json','r',encoding='utf-8').read())"
-    )
+    # Regresa un resumen simple (serializable)
+    return {
+        "virtual_rows": int(len(df_v)),
+        "escolar_rows": int(len(df_e)),
+        "prepa_rows": int(len(df_p)),
+        "comentarios_rows": int(len(df_com)),
+        "log_rows": int(len(df_log)),
+    }
