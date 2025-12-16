@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from typing import Any, Dict, List, Tuple
 
 import pandas as pd
+import numpy as np  # <-- AJUSTE: necesario para np.nan
 import gspread
 from google.oauth2.service_account import Credentials
 
@@ -71,12 +72,15 @@ MAPA_TEXTO_A_NUM = {
 DIGIT_RE = re.compile(r"^\s*([0-5])\s*$")
 LEADING_DIGIT_RE = re.compile(r"^\s*([0-5])\s*[-–—\.]\s*.*$")  # "5 - Excelente"
 
+
 def _norm(x: Any) -> str:
     return str(x).strip().lower() if x is not None else ""
+
 
 def es_columna_comentario(nombre_col: str) -> bool:
     t = _norm(nombre_col)
     return any(h in t for h in COMENTARIOS_HINTS)
+
 
 def convertir_valor(v: Any) -> Tuple[Any, str]:
     """
@@ -109,6 +113,7 @@ def convertir_valor(v: Any) -> Tuple[Any, str]:
 
     return (None, "unknown")
 
+
 # ============================================================
 # GOOGLE SHEETS HELPERS
 # ============================================================
@@ -116,6 +121,7 @@ def _to_plain_dict(v: Any) -> Any:
     if isinstance(v, Mapping):
         return dict(v)
     return v
+
 
 def _parse_service_account_info(gcp_service_account_json: Any) -> Dict[str, Any]:
     v = _to_plain_dict(gcp_service_account_json)
@@ -125,10 +131,12 @@ def _parse_service_account_info(gcp_service_account_json: Any) -> Dict[str, Any]
         return v
     raise TypeError("gcp_service_account_json debe ser str(JSON) o dict")
 
+
 def _authorize(gcp_service_account_json: Any):
     info = _parse_service_account_info(gcp_service_account_json)
     creds = Credentials.from_service_account_info(info, scopes=SCOPES)
     return gspread.authorize(creds)
+
 
 def _buscar_hoja_flexible(sh, nombre_hoja: str):
     objetivo = _norm(nombre_hoja)
@@ -140,12 +148,14 @@ def _buscar_hoja_flexible(sh, nombre_hoja: str):
             return ws
     return None
 
+
 def leer_hoja_df(sh, nombre_hoja: str) -> pd.DataFrame:
     ws = None
     try:
         ws = sh.worksheet(nombre_hoja)
     except Exception:
         ws = _buscar_hoja_flexible(sh, nombre_hoja)
+
     if ws is None:
         return pd.DataFrame()
 
@@ -156,7 +166,6 @@ def leer_hoja_df(sh, nombre_hoja: str) -> pd.DataFrame:
     header = values[0]
     data = values[1:]
 
-    # encabezados únicos si se repiten
     counts = {}
     header_unique = []
     for h in header:
@@ -172,12 +181,13 @@ def leer_hoja_df(sh, nombre_hoja: str) -> pd.DataFrame:
     df.columns = [c.strip() if isinstance(c, str) else c for c in df.columns]
     return df
 
+
 def _get_or_create_worksheet(sh, title: str, rows: int = 2000, cols: int = 200):
     try:
-        ws = sh.worksheet(title)
-        return ws
+        return sh.worksheet(title)
     except Exception:
         return sh.add_worksheet(title=title, rows=str(rows), cols=str(cols))
+
 
 def _clear_and_write(ws, df: pd.DataFrame):
     ws.clear()
@@ -187,21 +197,17 @@ def _clear_and_write(ws, df: pd.DataFrame):
 
     out = df.copy()
 
-    # Google Sheets no acepta NaN: convertir a ""
-    out = out.replace({np.nan: ""})  # type: ignore
+    # Google Sheets no acepta NaN
+    out = out.replace({np.nan: ""})
+
     values = [out.columns.tolist()] + out.astype(object).values.tolist()
     ws.update(values)
+
 
 # ============================================================
 # PROCESAMIENTO PRINCIPAL
 # ============================================================
 def procesar_formulario(df: pd.DataFrame, modalidad_label: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """
-    Retorna:
-      - df_num (misma forma que original, con numéricos donde aplique)
-      - df_com (filas de comentarios extraídas)
-      - df_log (log de valores no convertidos o convertidos)
-    """
     if df.empty:
         return df, pd.DataFrame(), pd.DataFrame()
 
@@ -209,12 +215,9 @@ def procesar_formulario(df: pd.DataFrame, modalidad_label: str) -> Tuple[pd.Data
     logs: List[Dict[str, Any]] = []
     comentarios_rows: List[Dict[str, Any]] = []
 
-    # Detecta columnas de comentario
     comentario_cols = [c for c in df_out.columns if es_columna_comentario(c)]
 
-    # Extraer comentarios en hoja aparte (manteniendo texto)
     if comentario_cols:
-        base_cols = [c for c in ["Marca temporal", "Carrera de procedencia", "Selecciona el programa académico que estudias", "Modalidad"] if c in df_out.columns]
         if "Modalidad" not in df_out.columns:
             df_out["Modalidad"] = modalidad_label
 
@@ -222,7 +225,6 @@ def procesar_formulario(df: pd.DataFrame, modalidad_label: str) -> Tuple[pd.Data
         df_com = df_out[base_cols + comentario_cols].copy()
         comentarios_rows = df_com.to_dict(orient="records")
 
-    # Convertir columnas no-comentario
     for col in df_out.columns:
         if col == "Modalidad":
             continue
@@ -231,19 +233,17 @@ def procesar_formulario(df: pd.DataFrame, modalidad_label: str) -> Tuple[pd.Data
 
         col_vals = df_out[col].tolist()
         converted = []
-        unknown_count = 0
         ok_count = 0
 
         for i, v in enumerate(col_vals):
             num, status = convertir_valor(v)
+
             if status == "unknown":
-                unknown_count += 1
-                # log solo si trae texto no vacío
                 if _norm(v) not in ("", "none", "nan"):
                     logs.append({
                         "Modalidad": modalidad_label,
                         "Columna": col,
-                        "Fila": i + 2,  # +2 por header y base 1
+                        "Fila": i + 2,
                         "Valor_original": v,
                         "Estatus": status,
                     })
@@ -252,18 +252,17 @@ def procesar_formulario(df: pd.DataFrame, modalidad_label: str) -> Tuple[pd.Data
 
             converted.append(num)
 
-        # Solo reemplazar la columna si hubo al menos un valor convertible
         if ok_count > 0:
             df_out[col] = pd.to_numeric(pd.Series(converted), errors="coerce")
 
     df_log = pd.DataFrame(logs)
     df_com = pd.DataFrame(comentarios_rows)
 
-    # Garantiza columna Modalidad en num (para auditoría)
     if "Modalidad" not in df_out.columns:
         df_out["Modalidad"] = modalidad_label
 
     return df_out, df_com, df_log
+
 
 def procesar_todo(gcp_service_account_json: Any) -> Dict[str, Any]:
     client = _authorize(gcp_service_account_json)
@@ -271,21 +270,25 @@ def procesar_todo(gcp_service_account_json: Any) -> Dict[str, Any]:
     sh_orig = client.open_by_key(ORIGINAL_KEY)
     sh_dest = client.open_by_key(PROCESADO_KEY)
 
-    # Leer originales
     df_v = leer_hoja_df(sh_orig, ORIG_VIRTUAL)
     df_e = leer_hoja_df(sh_orig, ORIG_ESCOLAR)
     df_p = leer_hoja_df(sh_orig, ORIG_PREPA)
 
-    # Procesar
     v_num, v_com, v_log = procesar_formulario(df_v, "Virtual")
     e_num, e_com, e_log = procesar_formulario(df_e, "Escolar")
     p_num, p_com, p_log = procesar_formulario(df_p, "Prepa")
 
-    # Unificar Comentarios y Log
-    df_com_all = pd.concat([v_com, e_com, p_com], ignore_index=True) if any([not v_com.empty, not e_com.empty, not p_com.empty]) else pd.DataFrame()
-    df_log_all = pd.concat([v_log, e_log, p_log], ignore_index=True) if any([not v_log.empty, not e_log.empty, not p_log.empty]) else pd.DataFrame()
+    df_com_all = (
+        pd.concat([v_com, e_com, p_com], ignore_index=True)
+        if any([not v_com.empty, not e_com.empty, not p_com.empty])
+        else pd.DataFrame()
+    )
+    df_log_all = (
+        pd.concat([v_log, e_log, p_log], ignore_index=True)
+        if any([not v_log.empty, not e_log.empty, not p_log.empty])
+        else pd.DataFrame()
+    )
 
-    # Escribir destino
     ws_v = _get_or_create_worksheet(sh_dest, DEST_VIRTUAL)
     ws_e = _get_or_create_worksheet(sh_dest, DEST_ESCOLAR)
     ws_p = _get_or_create_worksheet(sh_dest, DEST_PREPA)
@@ -309,6 +312,7 @@ def procesar_todo(gcp_service_account_json: Any) -> Dict[str, Any]:
         "log_rows": int(len(df_log_all)) if not df_log_all.empty else 0,
         "sheets_written": [DEST_VIRTUAL, DEST_ESCOLAR, DEST_PREPA, DEST_COMENTARIOS, DEST_LOG],
     }
+
 
 # ============================================================
 # FUNCIÓN main (OBLIGATORIA PARA app.py)
