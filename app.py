@@ -1,18 +1,59 @@
 import streamlit as st
-
 import observacion_clases
 import encuesta_calidad
-import procesar_encuestas_calidad as proc  # ORIGINAL → PROCESADO
+import procesar_encuestas_calidad as proc  # Procesa ORIGINAL → PROCESADO
 
+# ============================================================
+# Configuración básica de la página (debe ir antes de cualquier st.*)
+# ============================================================
+st.set_page_config(page_title="Dirección Académica", layout="wide")
 
-# =========================
-# Constantes
-# =========================
-APP_TITLE = "Dirección Académica"
-APP_SUBTITLE = "Seguimiento del Plan Anual."
-LOGO_PATH = "udl_logo.png"
+# ============================================================
+# Header (logo + título)
+# ============================================================
+logo_url = "udl_logo.png"
 
-VISTAS = ["Dirección General", "Dirección Académica", "Director de carrera"]
+col1, col2 = st.columns([1, 4])
+with col1:
+    st.image(logo_url, use_container_width=True)
+
+with col2:
+    st.title("Dirección Académica")
+    st.write("Seguimiento del Plan Anual.")
+
+st.divider()
+
+# ============================================================
+# Inicialización / Procesamiento (ORIGINAL → PROCESADO)
+# ============================================================
+with st.expander("Inicialización de encuestas (solo administración)", expanded=False):
+    st.caption(
+        "Usa este botón para convertir respuestas de texto a números y llenar el archivo PROCESADO. "
+        "Solo se requiere cuando haya nuevas respuestas."
+    )
+
+    if st.button("🔄 Procesar encuestas (ORIGINAL → PROCESADO)"):
+        try:
+            with st.spinner("Procesando encuestas, espera por favor..."):
+                # Ajusta esta llave a la que estés usando en Secrets.
+                # Si tu secreto se llama distinto, cambia la clave.
+                resultado = proc.main(st.secrets["gcp_service_account_json"])
+            st.success("Proceso terminado correctamente")
+            st.json(resultado)
+        except Exception as e:
+            st.error("Falló el procesamiento. Copia el error completo para revisarlo.")
+            st.exception(e)
+
+st.divider()
+
+# ============================================================
+# Selectores globales (vista, carrera, sección)
+# ============================================================
+vista = st.selectbox(
+    "Selecciona la vista:",
+    ["Dirección General", "Dirección Académica", "Director de carrera"],
+    key="vista_selector",
+)
 
 CARRERAS = [
     "Actuación",
@@ -49,6 +90,16 @@ CARRERAS = [
     "Preparatoria",
 ]
 
+carrera = None
+if vista == "Director de carrera":
+    carrera = st.selectbox(
+        "Selecciona la carrera:",
+        CARRERAS,
+        key="carrera_selector",
+    )
+
+st.divider()
+
 SECCIONES = [
     "Observación de clases",
     "Encuesta de calidad",
@@ -61,95 +112,37 @@ SECCIONES = [
     "Aulas virtuales",
 ]
 
-DEFAULT_SECCION = "Encuesta de calidad"
+# Persistencia de sección (evita reinicios inesperados)
+if "seccion_selector" not in st.session_state:
+    st.session_state["seccion_selector"] = "Encuesta de calidad"
 
+seccion = st.selectbox(
+    "Selecciona el apartado del plan anual que deseas revisar:",
+    SECCIONES,
+    key="seccion_selector",
+)
 
-# =========================
-# Helpers UI
-# =========================
-def render_header() -> None:
-    col1, col2 = st.columns([1, 4], vertical_alignment="center")
-    with col1:
-        try:
-            st.image(LOGO_PATH, use_container_width=True)
-        except Exception:
-            st.caption("Logo no disponible")
-    with col2:
-        st.title(APP_TITLE)
-        st.write(APP_SUBTITLE)
+st.divider()
 
+# ============================================================
+# Enrutamiento por sección (módulos)
+# ============================================================
+if seccion == "Observación de clases":
+    observacion_clases.render_observacion_clases(vista, carrera)
 
-def render_admin_processing() -> None:
-    with st.expander("Inicialización de encuestas (solo administración)", expanded=False):
-        st.caption(
-            "Convierte respuestas de texto a valores numéricos y llena el archivo PROCESADO. "
-            "Úsalo únicamente cuando haya nuevas respuestas."
-        )
+elif seccion == "Encuesta de calidad":
+    encuesta_calidad.render_encuesta_calidad(vista, carrera)
 
-        if st.button("Procesar encuestas (ORIGINAL → PROCESADO)"):
-            try:
-                with st.spinner("Procesando encuestas..."):
-                    resultado = proc.main(st.secrets["gcp_service_account_json"])
-                st.success("Proceso terminado correctamente.")
-                # Si quieres debug, deja esto; si no, puedes quitarlo.
-                st.json(resultado)
-            except KeyError:
-                st.error(
-                    "No encontré el secreto `gcp_service_account_json` en `st.secrets`."
-                )
-            except Exception as e:
-                st.error("Falló el procesamiento. Copia el error completo para revisarlo.")
-                st.exception(e)
-
-
-def render_sidebar_selectors():
-    st.sidebar.header("Navegación")
-
-    vista = st.sidebar.selectbox("Vista", VISTAS, key="vista_selector")
-
-    carrera = None
-    if vista == "Director de carrera":
-        carrera = st.sidebar.selectbox("Carrera", CARRERAS, key="carrera_selector")
-
-    if "seccion_selector" not in st.session_state:
-        st.session_state["seccion_selector"] = DEFAULT_SECCION
-
-    seccion = st.sidebar.selectbox(
-        "Apartado del plan anual",
-        SECCIONES,
-        key="seccion_selector",
-    )
-
-    return vista, carrera, seccion
-
-
-def render_placeholder(vista: str, carrera: str | None, seccion: str) -> None:
+else:
+    # Panel inicial solo cuando NO estás en un módulo implementado
     st.subheader("Panel inicial")
     st.write(f"Vista actual: **{vista}**")
-    st.write(f"Carrera seleccionada: **{carrera}**" if carrera else "Carrera seleccionada: *no aplica*")
+
+    if carrera:
+        st.write(f"Carrera seleccionada: **{carrera}**")
+    else:
+        st.write("Carrera seleccionada: *no aplica para esta vista*")
+
     st.write(f"Apartado seleccionado: **{seccion}**")
     st.markdown("---")
     st.info("Este apartado aún está en construcción dentro del ecosistema.")
-
-
-# =========================
-# App
-# =========================
-st.set_page_config(page_title=APP_TITLE, layout="wide")
-
-render_header()
-render_admin_processing()
-
-vista, carrera, seccion = render_sidebar_selectors()
-st.markdown("---")
-
-ROUTES = {
-    "Observación de clases": lambda: observacion_clases.render_observacion_clases(vista, carrera),
-    "Encuesta de calidad": lambda: encuesta_calidad.render_encuesta_calidad(vista, carrera),
-}
-
-handler = ROUTES.get(seccion)
-if handler:
-    handler()
-else:
-    render_placeholder(vista, carrera, seccion)
