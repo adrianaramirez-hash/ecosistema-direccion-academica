@@ -1,1 +1,0 @@
-# ecosistema-direccion-academica
